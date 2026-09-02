@@ -33,4 +33,5 @@ jobs:
             -scheme HermesMobile \
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO
