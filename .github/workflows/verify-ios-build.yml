@@ -40,3 +40,7 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Test HermesKit
+        working-directory: HermesKit
+        run: swift test
