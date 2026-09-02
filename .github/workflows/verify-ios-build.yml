@@ -1,0 +1,36 @@
+name: Verify iOS build
+
+on:
+  push:
+    branches:
+      - verify/app-intents-ios-build
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tuist
+        run: |
+          curl -fsSL https://github.com/tuist/tuist/releases/download/4.206.0/tuist.zip -o /tmp/tuist.zip
+          mkdir -p /tmp/tuist
+          unzip -q /tmp/tuist.zip -d /tmp/tuist
+          chmod +x /tmp/tuist/tuist
+          /tmp/tuist/tuist version
+
+      - name: Generate Xcode workspace
+        run: /tmp/tuist/tuist generate --no-open
+
+      - name: Build app for iOS Simulator
+        run: |
+          xcodebuild build \
+            -workspace HermesMobile.xcworkspace \
+            -scheme HermesMobile \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
