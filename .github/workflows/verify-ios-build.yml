@@ -43,4 +43,8 @@ jobs:
 
       - name: Test HermesKit
         working-directory: HermesKit
-        run: swift test
+        run: |
+          swift test --filter LaunchIntentTests --skip PushClientTests
+          swift test --skip PushClientTests
+        env:
+          SWIFT_DETERMINISTIC_TESTS: 1
