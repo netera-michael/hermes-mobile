@@ -36,6 +36,17 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
 
     public var id: String { slug ?? name }
 
+    /// The identifier to send as `--provider` on a model switch: the slug when present,
+    /// else the name (the gateway's `resolve_provider_full` matches either). Nil only
+    /// when BOTH are empty, in which case the model goes out bare and the gateway's
+    /// own detection ladder routes it.
+    public var selectionSlug: String? {
+      let slugValue = (slug ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      if !slugValue.isEmpty { return slugValue }
+      let nameValue = name.trimmingCharacters(in: .whitespacesAndNewlines)
+      return nameValue.isEmpty ? nil : nameValue
+    }
+
     /// Configured + usable: authenticated with at least one model. Unconfigured providers
     /// come back authenticated=false with an empty model list and a `warning`.
     public var isConfigured: Bool { (authenticated ?? false) && !models.isEmpty }

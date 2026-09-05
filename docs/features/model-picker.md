@@ -11,6 +11,14 @@ The composer's `model · effort` chip is the ONE affordance for both settings. T
 `configSet(key:value:previousValue:…)` → `config.set {session_id, key, value}` wrapped in the #17
 session-not-found heal (re-resume + a single replay, `CLAUDE.md` → "Gateway & session lifecycle").
 
+A model selection carries the picker section's provider: the row tap passes
+`ModelOptions.Provider.selectionSlug` (slug, else name, else nil) and the reducer appends it to
+the wire value as `"<model> --provider <slug>"` — desktop parity (`use-model-controls.ts`). Without
+it the gateway guesses the provider from the model id alone, so an `openai/…` row listed under
+OpenRouter routes to the direct OpenAI provider and fails on its key ("No usable credentials
+found for provider 'openai-api'"). A nil slug (no section context) stays a bare model id and the
+gateway's own detection ladder routes it, exactly as before.
+
 Selection is **optimistic and server-reconciled**: the reducer writes `state.model` /
 `state.reasoningEffort` before the RPC, and success is deliberately fire-and-forget — the gateway
 emits `session.info` after a successful `config.set` and `.sessionInfo` already reconciles both
