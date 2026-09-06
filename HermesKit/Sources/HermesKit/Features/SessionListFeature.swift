@@ -356,14 +356,18 @@ public struct SessionListFeature {
       flattenSessionsWithBranches(chronologicalSessions)
     }
 
-    /// Sessions with new activity since the user last opened them.
+    /// Sessions with new activity since the user last opened them. New agents own this
+    /// state server-side so Desktop and mobile agree; an absent field falls back to the
+    /// legacy device-local message-count watermark.
     public var unreadSessionIDs: Set<Session.ID> {
       Set(sessions.compactMap { session in
+        if let unread = session.unread { return unread ? session.id : nil }
         guard let count = session.messageCount, let seen = seenCounts[session.id], count > seen
         else { return nil }
         return session.id
       })
     }
+
 
     /// Rows to show for a group given its collapsed/expanded state.
     public func visibleSessions(in group: SessionGroup) -> [Session] {
@@ -869,10 +873,8 @@ public struct SessionListFeature {
 
       case let .sessionTapped(id):
         guard let session = state.sessions[id: id] else { return .none }
-        // Opening clears the unread flag (mark seen at the current count).
-        state.seenCounts[id] = session.messageCount ?? state.seenCounts[id] ?? 0
         return .merge(
-          persistSeenCounts(state.seenCounts),
+          markLocallyRead(id, state: &state),
           .send(.delegate(.openSession(session)))
         )
 
@@ -1579,6 +1581,17 @@ public struct SessionListFeature {
         await send(.cronJobActionFinished(id: id, refetchSessions: refetchSessions, error: .unreachable))
       }
     }
+  }
+
+  private func markLocallyRead(_ id: Session.ID, state: inout State) -> Effect<Action> {
+    guard let session = state.sessions[id: id] else { return .none }
+    // Preserve the legacy device watermark for older agents. The app-level common-open
+    // path owns the shared server acknowledgement so archived and push opens cannot bypass it.
+    state.seenCounts[id] = session.messageCount ?? state.seenCounts[id] ?? 0
+    if session.unread != nil {
+      state.sessions[id: id]?.unread = false
+    }
+    return persistSeenCounts(state.seenCounts)
   }
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {
