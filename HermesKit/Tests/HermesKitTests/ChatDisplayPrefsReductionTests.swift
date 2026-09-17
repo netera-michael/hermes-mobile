@@ -82,6 +82,9 @@ struct ChatDisplayPrefsReductionTests {
         showToolRows: false, showThinkingRows: false, autoFollowEnabled: false
       )
     }
+    // The guard opens the socket effect, which is long-lived by design — this test asserts
+    // the SEED, not the connection, so dismiss it (repo convention for `.task` tests).
+    await store.skipInFlightEffects()
   }
 
   /// A re-appearance over a LIVE slot must not reload the prefs: the slot outlives nav pops,
@@ -93,6 +96,8 @@ struct ChatDisplayPrefsReductionTests {
     await store.send(.task) {
       $0.hasStarted = true
     }
+    // The guard opens the socket effect; this test asserts pref seeding, not the socket.
+    await store.skipInFlightEffects()
     // User turns following off inside the chat.
     await store.send(.autoFollowToggled(false)) {
       $0.displayPrefs.autoFollowEnabled = false
@@ -102,6 +107,7 @@ struct ChatDisplayPrefsReductionTests {
 
     // Second `.task` (the view re-appearing) is a guarded no-op — no reseed, no effect.
     await store.send(.task)
+    await store.skipInFlightEffects()
     #expect(store.state.displayPrefs.autoFollowEnabled == false)
   }
 
