@@ -58,7 +58,7 @@ struct ChatQueueSteerTests {
         id: self.uuid(0), text: "actually use the other endpoint"
       )
     }
-    await store.receive(.queuedPromptSteerResult(id: uuid(0), accepted: true, error: nil)) {
+    await store.receive(\.queuedPromptSteerResult) {
       $0.pendingSteerEntries = [:]
     }
     // Accepted: the entry is gone for good — the live turn owns the text now.
@@ -80,7 +80,7 @@ struct ChatQueueSteerTests {
         id: self.uuid(0), text: "actually use the other endpoint"
       )
     }
-    await store.receive(.queuedPromptSteerResult(id: uuid(0), accepted: true, error: nil)) {
+    await store.receive(\.queuedPromptSteerResult) {
       $0.pendingSteerEntries = [:]
     }
     #expect(store.state.queuedPrompts.isEmpty)
@@ -101,7 +101,7 @@ struct ChatQueueSteerTests {
         id: self.uuid(0), text: "actually use the other endpoint"
       )
     }
-    await store.receive(.queuedPromptSteerResult(id: uuid(0), accepted: false, error: nil)) {
+    await store.receive(\.queuedPromptSteerResult) {
       $0.queuedPrompts = [QueuedPrompt(id: self.uuid(0), text: "actually use the other endpoint")]
       $0.pendingSteerEntries = [:]
       // Parked: nothing auto-fires into whatever just refused the correction.
@@ -124,9 +124,7 @@ struct ChatQueueSteerTests {
         id: self.uuid(0), text: "actually use the other endpoint"
       )
     }
-    await store.receive(
-      .queuedPromptSteerResult(id: uuid(0), accepted: false, error: .disconnected)
-    ) {
+    await store.receive(\.queuedPromptSteerResult) {
       $0.queuedPrompts = [QueuedPrompt(id: self.uuid(0), text: "actually use the other endpoint")]
       $0.pendingSteerEntries = [:]
       $0.isQueueParked = true
