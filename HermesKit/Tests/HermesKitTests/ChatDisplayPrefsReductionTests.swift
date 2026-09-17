@@ -105,9 +105,10 @@ struct ChatDisplayPrefsReductionTests {
     // A stale value lands in the store (as if another surface wrote it).
     prefs.saveAutoFollowEnabled(true)
 
-    // Second `.task` (the view re-appearing) is a guarded no-op — no reseed, no effect.
+    // Second `.task` (the view re-appearing) is a guarded no-op: it returns NO effect and
+    // changes no state — which is exactly what is asserted here. No drain is needed (and
+    // asking to drain would fail: a no-op leaves nothing in flight).
     await store.send(.task)
-    await store.skipInFlightEffects()
     #expect(store.state.displayPrefs.autoFollowEnabled == false)
   }
 
