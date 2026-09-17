@@ -1,0 +1,17 @@
+name: PR95 regression proof
+on:
+  push:
+    branches: [verify/pr95-slot-regression-red]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+      - name: Prove stale disappearance regression on upstream
+        working-directory: HermesKit
+        run: swift test --filter SlotGenerationTests
