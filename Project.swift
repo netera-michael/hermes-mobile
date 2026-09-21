@@ -13,6 +13,15 @@ let debugServerURL = Environment.serverUrl.getString(default: "")
 // builds pass CODE_SIGNING_ALLOWED=NO).
 let developmentTeam = Environment.developmentTeam.getString(default: "")
 
+// Personal-device overrides (fork-only; defaults keep upstream behavior byte-identical).
+// `HERMES_BUNDLE_ID=…` → `TUIST_BUNDLE_ID`: personal-signed build coexists with the
+// author's TestFlight install (same bundle id under a different team is refused as update).
+let appBundleId = Environment.bundleId.getString(default: "me.honcharenko.HermesMobile")
+let testsBundleId = Environment.testsBundleId.getString(default: "me.honcharenko.HermesMobileTests")
+// `HERMES_NO_PUSH=1` → `TUIST_NO_PUSH`: drop the `aps-environment` entitlement so a FREE
+// Apple ID (no Push capability) can sign. Push toggles hide (capability-gated); chat works.
+let noPush = Environment.noPush.getString(default: "") == "1"
+
 let project = Project(
   name: "HermesMobile",
   packages: [
@@ -30,7 +39,7 @@ let project = Project(
       // narrow iPadOS windows must resolve to the compact (stack) layout.
       destinations: [.iPhone, .iPad],
       product: .app,
-      bundleId: "me.honcharenko.HermesMobile",
+      bundleId: appBundleId,
       deploymentTargets: .iOS("18.0"),
       infoPlist: .extendingDefault(with: [
         // Wire the bundle version/short-version to the build settings below so a
@@ -77,7 +86,9 @@ let project = Project(
       // "development" would otherwise ship a sandbox entitlement on Release builds while
       // the app reports production — APNs would reject. The compile-time `apns_env`
       // (DEBUG → "sandbox", else "production") mirrors this.
-      entitlements: .dictionary([
+      // Personal free-signing builds (`HERMES_NO_PUSH=1`) drop the dict entirely —
+      // a free Apple ID has no Push capability, and the app capability-gates push.
+      entitlements: noPush ? nil : .dictionary([
         "aps-environment": "$(APS_ENVIRONMENT)",
       ]),
       dependencies: [
@@ -117,7 +128,7 @@ let project = Project(
       name: "HermesMobileTests",
       destinations: [.iPhone, .iPad],
       product: .unitTests,
-      bundleId: "me.honcharenko.HermesMobileTests",
+      bundleId: testsBundleId,
       deploymentTargets: .iOS("18.0"),
       sources: ["HermesMobileTests/**"],
       dependencies: [
