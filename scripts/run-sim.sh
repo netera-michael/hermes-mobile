@@ -13,11 +13,17 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SCHEME="HermesMobile"
 WORKSPACE="HermesMobile.xcworkspace"
-BUNDLE_ID="me.honcharenko.HermesMobile"
+# Personal builds pass HERMES_BUNDLE_ID; default keeps upstream.
+BUNDLE_ID="${HERMES_BUNDLE_ID:-me.honcharenko.HermesMobile}"
 SIM_NAME="${1:-${SIM_NAME:-iPhone 17 Pro}}"
 
 # Tuist only forwards TUIST_-prefixed env vars to the manifest, so translate.
-[ -d "$WORKSPACE" ] || TUIST_SERVER_URL="${HERMES_DEFAULT_SERVER_URL:-}" tuist generate --no-open
+# Always translate the bundle/no-push overrides (generate runs once, then is skipped).
+[ -d "$WORKSPACE" ] || TUIST_SERVER_URL="${HERMES_DEFAULT_SERVER_URL:-}" \
+  TUIST_BUNDLE_ID="$BUNDLE_ID" \
+  TUIST_TESTS_BUNDLE_ID="${HERMES_TESTS_BUNDLE_ID:-${BUNDLE_ID}Tests}" \
+  TUIST_NO_PUSH="${HERMES_NO_PUSH:-}" \
+  tuist generate --no-open
 
 # Resolve a simulator UDID by exact name (first available match).
 SIM_UDID="$(

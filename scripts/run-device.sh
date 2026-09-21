@@ -5,9 +5,20 @@
 #
 # Usage:
 #   DEVELOPMENT_TEAM=<your 10-char team id> scripts/run-device.sh
+#   # Free Apple ID: no Push capability — strip push entitlement + unique bundle id:
+#   DEVELOPMENT_TEAM=<team> HERMES_BUNDLE_ID=com.example.HermesDev HERMES_NO_PUSH=1 scripts/run-device.sh
+#   # Paid account (push works): unique bundle id only:
+#   DEVELOPMENT_TEAM=<team> HERMES_BUNDLE_ID=com.example.HermesDev scripts/run-device.sh
 # Notes:
-#   - Find your team id under the Apple Distribution/Development cert, e.g. 7V99GYC5W7.
-#   - The team is baked into the project at generate time, so this regenerates.
+#   - Find your team id: Xcode → Settings → Accounts → select team (10 chars), or
+#     `security find-identity -v -p codesigning` after first manual sign.
+#     Free accounts show a team id too (Personal Team) — no portal needed.
+#   - HERMES_BUNDLE_ID makes your build coexist with the author's TestFlight install
+#     (same id under a different team is refused as an update). Default keeps upstream.
+#   - HERMES_NO_PUSH=1 drops the aps-environment entitlement (free IDs can't sign it).
+#     Chat/server works; push toggles hide (capability-gated). Paid accounts omit it.
+#   - HERMES_DEFAULT_SERVER_URL bakes the Debug server preset (else enter in onboarding).
+#   - The team/id/no-push are baked into the project at generate time, so this regenerates.
 #   - Untested in CI here (no device) — drives `xcodebuild` + `devicectl`.
 #
 set -euo pipefail
@@ -15,13 +26,20 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SCHEME="HermesMobile"
 WORKSPACE="HermesMobile.xcworkspace"
-BUNDLE_ID="me.honcharenko.HermesMobile"
+BUNDLE_ID="${HERMES_BUNDLE_ID:-me.honcharenko.HermesMobile}"
+# Tests target id must track the app id (Xcode requires unique test bundle ids per team).
+TESTS_BUNDLE_ID="${HERMES_TESTS_BUNDLE_ID:-${BUNDLE_ID}Tests}"
 
 : "${DEVELOPMENT_TEAM:?Set DEVELOPMENT_TEAM=<your 10-char Apple team id> and re-run}"
 
-echo "▸ Generating project with team $DEVELOPMENT_TEAM"
+echo "▸ Generating project with team $DEVELOPMENT_TEAM, bundle $BUNDLE_ID"
 # Tuist only forwards TUIST_-prefixed env vars to the manifest, so translate.
-TUIST_DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" tuist generate --no-open
+TUIST_DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+TUIST_BUNDLE_ID="$BUNDLE_ID" \
+TUIST_TESTS_BUNDLE_ID="$TESTS_BUNDLE_ID" \
+TUIST_SERVER_URL="${HERMES_DEFAULT_SERVER_URL:-}" \
+TUIST_NO_PUSH="${HERMES_NO_PUSH:-}" \
+tuist generate --no-open
 
 # First connected/available device UDID.
 DEVICE_UDID="$(
