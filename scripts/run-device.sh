@@ -58,6 +58,7 @@ xcodebuild build \
   -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Debug \
   -destination "id=$DEVICE_UDID" \
   -allowProvisioningUpdates \
+  -skipMacroValidation \
   -quiet
 
 APP_PATH="$(
