@@ -16,7 +16,8 @@ struct SessionRowView: View {
   var isUnread: Bool = false
   /// Whether this session is pinned (shows a small pin glyph).
   var isPinned: Bool = false
-  /// Whether the agent is currently working this session — renders a brand-tinted glow.
+  /// Whether the agent is currently working this session — renders an explicit status cue
+  /// alongside the existing brand-tinted glow.
   var isActive: Bool = false
 
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -64,7 +65,21 @@ struct SessionRowView: View {
             .accessibilityLabel("Pinned")
         }
         Spacer()
-        if let updatedAt = session.updatedAt {
+        if isActive {
+          HStack(spacing: 4) {
+            ProgressView()
+              .controlSize(.mini)
+              .tint(Color.hermesAccent)
+              .accessibilityHidden(true)
+            Text("Working")
+              .font(.caption)
+              .fontWeight(.medium)
+          }
+          .foregroundStyle(Color.hermesAccent)
+          .fixedSize()
+          .accessibilityElement(children: .ignore)
+          .accessibilityLabel("Working")
+        } else if let updatedAt = session.updatedAt {
           Text(Self.relativeFormatter.localizedString(for: updatedAt, relativeTo: now))
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -127,8 +142,6 @@ private struct ActiveGlow: ViewModifier {
             )
             .shadow(color: Color.hermesAccent.opacity(0.6 * intensity), radius: 8)
         )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Working")
     )
   }
 }

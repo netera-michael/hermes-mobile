@@ -9,10 +9,10 @@ import XCTest
 final class SessionSnapshotTests: SnapshotTestCase {
   // MARK: SessionRowView
 
-  /// Identical session fixtures rendered with the working glow off vs on — the only
-  /// difference is `isActive`, isolating the brand-tinted pulse the list shows while the
-  /// agent is working a session (state-sync Task 10). The glow is driven by the
-  /// event-driven `runningChanged` delegate (instant clear) with the poll as backstop.
+  /// Identical session fixtures rendered with the working state off vs on — the only
+  /// difference is `isActive`, isolating the explicit spinner + "Working" cue and the
+  /// existing brand-tinted pulse. The state is driven by the event-driven `runningChanged`
+  /// delegate (instant clear) with the poll as backstop.
   private func glowFixtureSession() -> Session {
     Session(
       id: "20260610_120231_afcca6",
@@ -68,7 +68,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
   }
 
   func testSessionRow_active() {
-    // A session the agent is currently working — renders the brand-tinted glow.
+    // A session the agent is currently working — renders the explicit status cue and glow.
     let view = SessionRowView(
       session: Session(
         id: "20260610_120231_afcca6",
@@ -77,6 +77,7 @@ final class SessionSnapshotTests: SnapshotTestCase {
         isActive: true
       ),
       now: now,
+      isUnread: true,
       isActive: true
     )
     .padding()
