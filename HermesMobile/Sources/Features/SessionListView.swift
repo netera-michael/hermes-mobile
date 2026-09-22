@@ -154,10 +154,21 @@ struct SessionListView: View {
         groupSection(group)
       }
     case .chronological:
-      // One last-active-ordered list — no workspace headers; branches nest under
-      // their parent with elbow stems.
-      ForEach(store.chronologicalEntries) { entry in
-        row(entry)
+      // Match Desktop's recency lanes. The top-level "Sessions" header names today's
+      // newest lane; older calendar buckets get their own dividers. Pinned rows remain
+      // in the separate Pinned section above and branch children stay with their parent.
+      ForEach(SessionDateGrouping.groups(store.chronologicalEntries, now: store.now)) { group in
+        if let label = group.label {
+          Section(label) {
+            ForEach(group.entries) { entry in
+              row(entry)
+            }
+          }
+        } else {
+          ForEach(group.entries) { entry in
+            row(entry)
+          }
+        }
       }
     }
     // Cron-scheduled sessions live in their own always-on section below the
@@ -435,7 +446,7 @@ struct SessionListView: View {
         )
       ) {
         Label("By workspace", systemImage: "folder").tag(SessionGroupingMode.workspace)
-        Label("Chronological", systemImage: "clock").tag(SessionGroupingMode.chronological)
+        Label("By date", systemImage: "clock").tag(SessionGroupingMode.chronological)
       }
       .pickerStyle(.inline)
 

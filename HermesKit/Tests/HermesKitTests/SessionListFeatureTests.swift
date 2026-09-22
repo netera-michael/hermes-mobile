@@ -568,6 +568,44 @@ struct SessionListFeatureTests {
 
   // MARK: Branch nesting per lane
 
+  @Test func chronologicalDateGroupsMatchDesktopBucketsAndKeepBranchesTogether() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+    calendar.firstWeekday = 2 // Monday
+    let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 23, hour: 12)))
+    func date(_ day: Int, _ hour: Int = 12) -> Date {
+      calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour))!
+    }
+
+    let entries = [
+      SessionBranchEntry(session: Session(id: "today", updatedAt: date(23))),
+      SessionBranchEntry(session: Session(id: "yesterday", updatedAt: date(22))),
+      SessionBranchEntry(session: Session(id: "branch", updatedAt: date(23), parentSessionID: "yesterday"), branchStem: "└─ "),
+      SessionBranchEntry(session: Session(id: "week", updatedAt: date(21))),
+      SessionBranchEntry(session: Session(id: "last-week", updatedAt: date(18))),
+    ]
+
+    let groups = SessionDateGrouping.groups(entries, now: now, calendar: calendar)
+    #expect(groups.map(\.id) == ["today", "yesterday", "this-week", "last-week"])
+    #expect(groups.map(\.label) == [nil, "Yesterday", "Earlier This Week", "Last Week"])
+    #expect(groups[1].entries.map(\.id) == ["yesterday", "branch"])
+  }
+
+  @Test func chronologicalDateGroupsUseFourAMDayRollover() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+    let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 23, hour: 3)))
+    let lateNight = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 22, hour: 23)))
+    let groups = SessionDateGrouping.groups(
+      [SessionBranchEntry(session: Session(id: "late", updatedAt: lateNight))],
+      now: now,
+      calendar: calendar
+    )
+
+    #expect(groups.map(\.id) == ["today"])
+    #expect(groups.map(\.label) == [nil])
+  }
+
   @Test func branchNestsUnderParentInChronologicalLane() {
     let sessions = [
       Session(id: "other", updatedAt: Date(timeIntervalSince1970: 30)),
