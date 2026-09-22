@@ -2058,6 +2058,27 @@ struct SessionListFeatureTests {
     }
   }
 
+  @Test func settingsPresentationSeedsGlobalDisplayPrefs() async {
+    let prefs = PreferencesClient.inMemory()
+    prefs.saveShowToolRows(false)
+    prefs.saveShowThinkingRows(false)
+    prefs.saveAutoFollowEnabled(false)
+    let store = TestStore(initialState: SessionListFeature.State(connection: connection)) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.preferences = prefs
+    }
+
+    await store.send(.settingsButtonTapped) {
+      $0.settings = SettingsFeature.State(
+        connection: self.connection,
+        displayPrefs: ChatDisplayPrefs(
+          showToolRows: false, showThinkingRows: false, autoFollowEnabled: false
+        )
+      )
+    }
+  }
+
   @Test func settingsSwipeActionDelegateUpdatesTheList() async {
     var initial = SessionListFeature.State(connection: connection)
     initial.settings = SettingsFeature.State(connection: connection)

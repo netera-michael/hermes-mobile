@@ -166,6 +166,33 @@ struct SettingsView: View {
       } footer: {
         Text("Removes the token from the Keychain and returns to the connection screen.")
       }
+
+      Section {
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.showThinkingRows },
+          set: { store.send(.showThinkingRowsToggled($0)) }
+        )) {
+          Label("Show thinking", systemImage: "brain")
+        }
+
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.showToolRows },
+          set: { store.send(.showToolRowsToggled($0)) }
+        )) {
+          Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+        }
+
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.autoFollowEnabled },
+          set: { store.send(.autoFollowToggled($0)) }
+        )) {
+          Label("Follow new output", systemImage: "arrow.down.to.line")
+        }
+      } header: {
+        Text("New chats")
+      } footer: {
+        Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
+      }
     }
     .navigationTitle("Settings")
     .navigationBarTitleDisplayMode(.inline)

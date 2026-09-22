@@ -43,6 +43,11 @@ public struct SettingsFeature {
     /// session list's capability flag). When false the swipe-action picker is hidden —
     /// Delete isn't offered anywhere, so the choice would be meaningless.
     public var deleteSupported: Bool
+    /// Default chat-display prefs for NEW chats (personal-lane global defaults beside the
+    /// per-chat ⋯-menu overrides). Seeded from `PreferencesClient` when Settings is
+    /// presented; new chat slots seed from the same keys, so a change here applies to
+    /// every chat created afterwards. Open chats keep their own live values.
+    public var displayPrefs: ChatDisplayPrefs
 
     /// The outcome of a "send test notification" attempt, surfaced in the view/snapshots.
     public enum TestPushStatus: Equatable, Sendable {
@@ -73,7 +78,8 @@ public struct SettingsFeature {
       pushPlugin: PushPluginInfo? = nil,
       pluginUpdate: PluginUpdateStatus = .idle,
       defaultSwipeAction: SessionSwipeAction = .default,
-      deleteSupported: Bool = true
+      deleteSupported: Bool = true,
+      displayPrefs: ChatDisplayPrefs = ChatDisplayPrefs()
     ) {
       self.connection = connection
       self.token = connection.token ?? ""
@@ -87,6 +93,7 @@ public struct SettingsFeature {
       self.pluginUpdate = pluginUpdate
       self.defaultSwipeAction = defaultSwipeAction
       self.deleteSupported = deleteSupported
+      self.displayPrefs = displayPrefs
     }
 
     /// The installed plugin is behind `PushSetup.minimumPluginVersion` AND the agent can pull
@@ -145,6 +152,11 @@ public struct SettingsFeature {
     case pluginUpdateResult(PluginUpdateOutcome)
     /// User picked a different default swipe action for session rows.
     case defaultSwipeActionChanged(SessionSwipeAction)
+    /// User flipped one of the global default chat-display prefs (applies to NEW chats;
+    /// open chats keep their own live values).
+    case showToolRowsToggled(Bool)
+    case showThinkingRowsToggled(Bool)
+    case autoFollowToggled(Bool)
     case delegate(Delegate)
 
     /// Result of the in-app plugin update, flattened to an `Equatable` shape (the failure
@@ -312,6 +324,26 @@ public struct SettingsFeature {
         preferences.saveDefaultSessionSwipeAction(action)
         // Bubble up so the session list reflects the new default immediately on dismissal.
         return .send(.delegate(.defaultSwipeActionChanged(action)))
+
+      // MARK: Global default chat-display prefs (personal lane)
+
+      case let .showToolRowsToggled(show):
+        guard state.displayPrefs.showToolRows != show else { return .none }
+        state.displayPrefs.showToolRows = show
+        preferences.saveShowToolRows(show)
+        return .none
+
+      case let .showThinkingRowsToggled(show):
+        guard state.displayPrefs.showThinkingRows != show else { return .none }
+        state.displayPrefs.showThinkingRows = show
+        preferences.saveShowThinkingRows(show)
+        return .none
+
+      case let .autoFollowToggled(enabled):
+        guard state.displayPrefs.autoFollowEnabled != enabled else { return .none }
+        state.displayPrefs.autoFollowEnabled = enabled
+        preferences.saveAutoFollowEnabled(enabled)
+        return .none
 
       case .askAgentToInstallTapped:
         // Dismiss Settings and bubble up — `AppFeature` opens a new chat with the install

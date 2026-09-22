@@ -1174,7 +1174,12 @@ public struct SessionListFeature {
           connection: state.connection,
           pushAvailable: state.pushAvailable,
           defaultSwipeAction: state.defaultSwipeAction,
-          deleteSupported: state.deleteSupported
+          deleteSupported: state.deleteSupported,
+          displayPrefs: ChatDisplayPrefs(
+            showToolRows: preferences.loadShowToolRows(),
+            showThinkingRows: preferences.loadShowThinkingRows(),
+            autoFollowEnabled: preferences.loadAutoFollowEnabled()
+          )
         )
         return .none
 
