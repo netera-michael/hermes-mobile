@@ -451,10 +451,17 @@ public protocol WebSocketTransport: Sendable {
 }
 
 final class URLSessionWebSocketTransport: WebSocketTransport, @unchecked Sendable {
+  /// Mobile resumes carry the full transcript in one JSON-RPC WebSocket message. Foundation's
+  /// default receive ceiling is too small for a mature session (the socket closes with 1009,
+  /// then ChatFeature reconnects forever). Keep this equal to the gateway's 16 MiB frame
+  /// budget: enough for a full resume without allowing an unbounded allocation.
+  static let maximumInboundMessageBytes = 16 * 1024 * 1024
+
   private let task: URLSessionWebSocketTask
 
   init(url: URL, session: URLSession) {
     task = session.webSocketTask(with: url)
+    task.maximumMessageSize = Self.maximumInboundMessageBytes
     task.resume()
   }
 

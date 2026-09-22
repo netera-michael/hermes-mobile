@@ -52,6 +52,13 @@ private func requestID(_ frame: String) -> Int? {
 @Suite struct HermesGatewayClientTests {
   private let url = URL(string: "http://test.local:9119")!
 
+  @Test func liveTransportAcceptsGatewaySizedResumeFrames() {
+    // `session.resume` is one WebSocket message containing the full transcript. Keep the
+    // Foundation client ceiling aligned with the server's 16 MiB frame budget so long chats
+    // don't close with 1009 and enter ChatFeature's reconnect loop.
+    #expect(URLSessionWebSocketTransport.maximumInboundMessageBytes == 16 * 1024 * 1024)
+  }
+
   @Test func sendResolvesOnMatchingResult() async throws {
     let transport = FakeTransport { frame, inbound in
       if let id = requestID(frame) {
