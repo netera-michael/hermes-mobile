@@ -1741,16 +1741,20 @@ private func fetchSessions(
   let query = rawQuery.trimmingCharacters(in: .whitespaces)
   do {
     let sessions: [Session]
+    let raw: [Session]
     if !query.isEmpty {
-      sessions = try await rest.search(connection, query)
+      raw = try await rest.search(connection, query)
     } else if profilesSupported {
       // The dedicated profiles endpoint takes the literal name (incl. "default") — unlike the
       // legacy per-session mutation endpoints, which use `scopedProfileName` (default→nil). The
       // canonical default name is `SessionListFeature.State.defaultProfileName`.
-      sessions = try await profiles.sessions(connection, profileName, .exclude, .recent, 50, 0)
+      raw = try await profiles.sessions(connection, profileName, .exclude, .recent, 50, 0)
     } else {
-      sessions = try await rest.sessions(connection, 50, 0, .recent)
+      raw = try await rest.sessions(connection, 50, 0, .recent)
     }
+    // Desktop parity: oneshot (CLI probes, subagents, health checks) never appears in the
+    // desktop sidebar. Cron sessions have their own section, so they pass through here.
+    sessions = raw.filter { !$0.isOneshot }
     return .sessionsResponse(.success(sessions))
   } catch let error as RESTError {
     return .sessionsResponse(.failure(error))

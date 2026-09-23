@@ -72,6 +72,11 @@ public struct Session: Equatable, Sendable, Identifiable {
   /// Cron Jobs list partition (mirrors the desktop's `source === "cron"` special-case).
   public var isCron: Bool { source == "cron" }
 
+  /// Whether this is a one-shot probe/test session (CLI `hermes -1`, subagent, automated
+  /// health check). These never appear in the desktop sidebar and should be excluded from
+  /// the mobile session list for parity.
+  public var isOneshot: Bool { source == "oneshot" }
+
   /// A real, user-facing title: non-empty and not the server's `"Untitled"` placeholder
   /// (the agent sends that for auto-named/cron sessions before a real title exists).
   /// Mirrors the web app's `session.title && session.title !== "Untitled"` check.
