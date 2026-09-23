@@ -8,6 +8,7 @@ public enum ConnectionTraceKind: String, CaseIterable, Sendable, Codable {
   case socketSuspended, reconnectScheduled, hydrateStarted, hydrateSucceeded, hydrateFailed
   case sendStarted, sendAccepted, sendTimedOut, sendDisconnected, sendRejected
   case pollRow, pollFailed, runningChanged
+  case hydrateProvenance
 }
 
 public enum ConnectionTraceReason: String, Sendable, Codable {
@@ -27,12 +28,20 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
   public let baseline: Bool?
   public let rowCount: Int?
   public let reason: ConnectionTraceReason?
+  /// Row-provenance diagnostic: how many user-role rows came from the server's `messages`.
+  public let persistedUserRows: Int?
+  /// Row-provenance diagnostic: whether `inflight.user` contributed an extra user row.
+  public let inflightUserRow: Bool?
+  /// Row-provenance diagnostic: whether the tail-dedup suppressed a duplicate inflight user row.
+  public let dedupFired: Bool?
 
   public init(timestamp: Date, generation: Int, sendID: UUID? = nil,
               kind: ConnectionTraceKind, sessionID: String? = nil,
               serverActive: Bool? = nil, displayActive: Bool? = nil,
               baseline: Bool? = nil, rowCount: Int? = nil,
-              reason: ConnectionTraceReason? = nil) {
+              reason: ConnectionTraceReason? = nil,
+              persistedUserRows: Int? = nil, inflightUserRow: Bool? = nil,
+              dedupFired: Bool? = nil) {
     self.timestamp = timestamp
     self.generation = generation
     self.sendID = sendID
@@ -53,12 +62,17 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
     self.baseline = baseline
     self.rowCount = rowCount.map { min(1_000_000, max(0, $0)) }
     self.reason = reason
+    self.persistedUserRows = persistedUserRows.map { min(10_000, max(0, $0)) }
+    self.inflightUserRow = inflightUserRow
+    self.dedupFired = dedupFired
   }
 
   enum CodingKeys: String, CodingKey {
     case timestamp = "at", kind, sessionID = "session_id", generation = "slot"
     case sendID = "send_id", serverActive = "server_active"
     case displayActive = "display_active", baseline, rowCount = "rows", reason
+    case persistedUserRows = "persisted_user_rows"
+    case inflightUserRow = "inflight_user_row", dedupFired = "dedup_fired"
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -75,6 +89,9 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
     try box.encodeIfPresent(baseline, forKey: .baseline)
     try box.encodeIfPresent(rowCount, forKey: .rowCount)
     try box.encodeIfPresent(reason, forKey: .reason)
+    try box.encodeIfPresent(persistedUserRows, forKey: .persistedUserRows)
+    try box.encodeIfPresent(inflightUserRow, forKey: .inflightUserRow)
+    try box.encodeIfPresent(dedupFired, forKey: .dedupFired)
   }
 
   public var line: String {

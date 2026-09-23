@@ -2983,6 +2983,11 @@ public struct ChatFeature {
     state.thinkingRowID = nil
     state.toolRowIDs = [:]
 
+    // Row-provenance tracking: count user-role rows from server messages vs inflight.
+    let persistedUserRowCount = response.messages.filter { $0.role == "user" }.count
+    var inflightUserRowAdded = false
+    var inflightDedupFired = false
+
     // Seed the in-flight turn snapshot (lost when the agent process restarts — acceptable).
     // Use DETERMINISTIC, position-derived ids (same convention as `reconstructTranscript`) so
     // repeated hydrates of the same running turn yield byte-identical in-flight row ids — no
@@ -3006,6 +3011,9 @@ public struct ChatFeature {
             ),
             kind: userKind
           ))
+          inflightUserRowAdded = true
+        } else {
+          inflightDedupFired = true
         }
       }
       // Seed the streaming row eagerly when the turn is still streaming so the next
@@ -3048,6 +3056,18 @@ public struct ChatFeature {
     state.windowStart = State.bottomWindowStart(count: state.transcript.count)
 
     trace(.hydrateSucceeded, state: state, rowCount: state.transcript.count)
+    // Row-provenance diagnostic: emit after hydration so the telemetry receiver can
+    // distinguish persisted messages from inflight and detect dedup firing.
+    if inflightUserRowAdded || inflightDedupFired || persistedUserRowCount > 0 {
+      connectionTrace.append(.init(
+        timestamp: Date(), generation: connectionTrace.currentSlot(),
+        kind: .hydrateProvenance, sessionID: state.sessionKey,
+        rowCount: state.transcript.count,
+        persistedUserRows: persistedUserRowCount,
+        inflightUserRow: inflightUserRowAdded,
+        dedupFired: inflightDedupFired
+      ))
+    }
     // Persist the freshly-hydrated, server-authoritative state back to the cache so the next
     // cold open paints from it (debounced — coalesces with any immediately-following deltas).
     let persist = debouncedPersist()
