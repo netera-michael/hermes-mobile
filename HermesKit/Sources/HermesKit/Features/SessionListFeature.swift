@@ -1667,31 +1667,55 @@ public struct SessionListFeature {
   /// row back on without any new server activity. A baseline holds until fresher row
   /// activity proves a genuine restart elsewhere (`updatedAt`/`messageCount` advancing),
   /// or the row disappears from the list.
+  ///
+  /// Additionally, sessions this device never opened have no baseline, so a stale
+  /// `is_active=true` from the server's 300-second heuristic can linger. When a session
+  /// claims active but its `updatedAt` is older than the server's activity window (5 min),
+  /// demote it — the turn almost certainly ended and the server heuristic is stale.
   private func reconcileStoppedBaselines(_ state: inout State) {
-    guard !state.stoppedBaselines.isEmpty else { return }
-    for id in state.stoppedBaselines.keys {
-      guard let row = state.sessions[id: id], let baseline = state.stoppedBaselines[id]
-      else {
-        state.stoppedBaselines.removeValue(forKey: id)
-        continue
+    let now = Date()
+    let staleThreshold: TimeInterval = 300 // Match the server's _ACTIVE_WINDOW_S
+
+    // Phase 1: baseline-backed reconciliation (sessions opened on this device).
+    if !state.stoppedBaselines.isEmpty {
+      for id in state.stoppedBaselines.keys {
+        guard let row = state.sessions[id: id], let baseline = state.stoppedBaselines[id]
+        else {
+          state.stoppedBaselines.removeValue(forKey: id)
+          continue
+        }
+        let advanced: Bool = {
+          if let count = row.messageCount, let base = baseline.messageCount, count > base {
+            return true
+          }
+          if let updated = row.updatedAt, let base = baseline.updatedAt, updated > base {
+            return true
+          }
+          return false
+        }()
+        if advanced {
+          state.stoppedBaselines.removeValue(forKey: id)
+          connectionTrace.append(.init(timestamp: now, generation: connectionTrace.currentSlot(),
+                                       kind: .runningChanged, sessionID: id,
+                                       serverActive: row.isActive, displayActive: row.isActive,
+                                       baseline: false, reason: .newerActivity))
+        } else if row.isActive == true {
+          state.sessions[id: id]?.isActive = false
+        }
       }
-      let advanced: Bool = {
-        if let count = row.messageCount, let base = baseline.messageCount, count > base {
-          return true
-        }
-        if let updated = row.updatedAt, let base = baseline.updatedAt, updated > base {
-          return true
-        }
-        return false
-      }()
-      if advanced {
-        state.stoppedBaselines.removeValue(forKey: id)
-        connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
-                                     kind: .runningChanged, sessionID: id,
-                                     serverActive: row.isActive, displayActive: row.isActive,
-                                     baseline: false, reason: .newerActivity))
-      } else if row.isActive == true {
-        state.sessions[id: id]?.isActive = false
+    }
+
+    // Phase 2: staleness heuristic for sessions without a baseline (never opened here).
+    // If the server says active but updatedAt is older than the activity window, the turn
+    // ended and the heuristic just hasn't expired yet — demote to not-active.
+    for session in state.sessions where session.isActive == true {
+      guard state.stoppedBaselines[session.id] == nil else { continue } // Phase 1 handled it
+      if let updated = session.updatedAt, now.timeIntervalSince(updated) > staleThreshold {
+        state.sessions[id: session.id]?.isActive = false
+        connectionTrace.append(.init(timestamp: now, generation: connectionTrace.currentSlot(),
+                                     kind: .runningChanged, sessionID: session.id,
+                                     serverActive: true, displayActive: false,
+                                     baseline: false, reason: .staleHeuristic))
       }
     }
   }

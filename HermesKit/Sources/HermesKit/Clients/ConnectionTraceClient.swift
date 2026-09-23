@@ -11,7 +11,7 @@ public enum ConnectionTraceKind: String, CaseIterable, Sendable, Codable {
 }
 
 public enum ConnectionTraceReason: String, Sendable, Codable {
-  case poll, stoppedBaseline, newerActivity, delegateStart, delegateStop, missingRow
+  case poll, stoppedBaseline, newerActivity, staleHeuristic, delegateStart, delegateStop, missingRow
 }
 
 /// Wire schema for the optional mobile-telemetry dashboard plugin. Nil fields encode as null.
