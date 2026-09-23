@@ -624,6 +624,7 @@ public struct SessionListFeature {
   @Dependency(\.preferences) var preferences
   @Dependency(\.push) var push
   @Dependency(\.pasteboard) var pasteboard
+  @Dependency(\.connectionTrace) var connectionTrace
 
   public init() {}
 
@@ -698,6 +699,10 @@ public struct SessionListFeature {
             updatedAt: row.updatedAt, messageCount: row.messageCount)
         }
         state.sessions[id: id]?.isActive = running
+        connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
+                                     kind: .runningChanged, sessionID: id,
+                                     displayActive: running, baseline: !running,
+                                     reason: running ? .delegateStart : .delegateStop))
         return .none
 
       case let .cronJobsResponse(.success(jobs)):
@@ -888,7 +893,20 @@ public struct SessionListFeature {
         // (#78). `IdentifiedArray(uniqueElements:)` preconditions on unique ids and
         // trapped in the field, so dedupe first — keep the FIRST occurrence (server order).
         state.sessions = IdentifiedArray(filtered, uniquingIDsWith: { first, _ in first })
+        // Capture the server inputs BEFORE the stop-baseline mutates displayed rows.
+        let serverRows = state.sessions.map { ($0.id, $0.isActive) }
+        let baselineIDs = Set(state.stoppedBaselines.keys)
         reconcileStoppedBaselines(&state)
+        for (id, serverActive) in serverRows where
+          serverActive == true || baselineIDs.contains(id) {
+          let baseline = state.stoppedBaselines[id] != nil
+          connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
+                                       kind: .pollRow, sessionID: id,
+                                       serverActive: serverActive,
+                                       displayActive: state.sessions[id: id]?.isActive,
+                                       baseline: baseline,
+                                       reason: baseline ? .stoppedBaseline : .poll))
+        }
         let visible = state.sessions
         // Seed last-seen counts for newly-discovered sessions so they don't all show as
         // unread on first sight; only later increases flag unread.
@@ -897,13 +915,20 @@ public struct SessionListFeature {
           state.seenCounts[session.id] = session.messageCount ?? 0
           seeded = true
         }
-        guard seeded else { return .none }
-        return persistSeenCounts(state.seenCounts)
+        let upload = Effect<Action>.run { [connectionTrace, connection = state.connection] _ in
+          await connectionTrace.upload(connection)
+        }
+        guard seeded else { return upload }
+        return .merge(persistSeenCounts(state.seenCounts), upload)
 
       case let .sessionsResponse(.failure(error)):
         state.isLoading = false
         state.loadError = error.message
-        return .none
+        connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
+                                     kind: .pollFailed))
+        return .run { [connectionTrace, connection = state.connection] _ in
+          await connectionTrace.upload(connection)
+        }
 
       case let .sessionTapped(id):
         guard let session = state.sessions[id: id] else { return .none }
@@ -1661,6 +1686,10 @@ public struct SessionListFeature {
       }()
       if advanced {
         state.stoppedBaselines.removeValue(forKey: id)
+        connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
+                                     kind: .runningChanged, sessionID: id,
+                                     serverActive: row.isActive, displayActive: row.isActive,
+                                     baseline: false, reason: .newerActivity))
       } else if row.isActive == true {
         state.sessions[id: id]?.isActive = false
       }

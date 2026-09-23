@@ -19,6 +19,27 @@ struct ConnectionTraceTests {
     #expect(entries[0].timestamp < entries[1].timestamp)
   }
 
+  @Test func workingPollExportsInputAndDisplayedDecisionWithoutContent() throws {
+    let entry = ConnectionTraceEntry(timestamp: Date(), generation: 3, kind: .pollRow,
+                                     sessionID: "20260922_214812_05f089", serverActive: true,
+                                     displayActive: false, baseline: true, reason: .stoppedBaseline)
+    let json = try JSONEncoder().encode(entry)
+    let object = try #require(JSONSerialization.jsonObject(with: json) as? [String: Any])
+    #expect(object["kind"] as? String == "pollRow")
+    #expect(object["session_id"] as? String == "20260922_214812_05f089")
+    #expect(object["server_active"] as? Bool == true)
+    #expect(object["display_active"] as? Bool == false)
+    #expect(object["baseline"] as? Bool == true)
+    #expect(object["reason"] as? String == "stoppedBaseline")
+    #expect(object["at"] is String)
+    #expect(object["slot"] as? Int == 3)
+    #expect(object["raw"] == nil)
+    #expect(object["token"] == nil)
+    #expect(object["content"] == nil)
+    #expect(ConnectionTraceEntry(timestamp: Date(), generation: 0, kind: .pollRow,
+                                 sessionID: "secret@host/path").sessionID == nil)
+  }
+
   @Test func exportedVocabularyCannotContainPayloads() {
     let trace = ConnectionTraceClient.ringBuffer()
     trace.append(.init(timestamp: Date(timeIntervalSince1970: 0), generation: 4,

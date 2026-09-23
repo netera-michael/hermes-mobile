@@ -420,6 +420,9 @@ public struct AppFeature {
           return .merge(
             .cancel(id: CancelID.backgroundGrace),
             .run { [backgroundTask] _ in await backgroundTask.end() },
+            state.home.map(\.connection).map { connection in
+              .run { [connectionTrace] _ in await connectionTrace.upload(connection) }
+            } ?? .none,
             state.liveChat != nil ? .send(.liveChat(.foreground)) : .none,
             state.home != nil ? .send(.home(.pulledToRefresh)) : .none,
             // Stuck on the retry screen? Foregrounding is exactly the moment the user just
@@ -1223,7 +1226,8 @@ public struct AppFeature {
     // Count compact switches too: the trace generation identifies a slot, not a view.
     let generation = connectionTrace.nextSlot()
     connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                 kind: state.liveChat == nil ? .slotOpened : .slotReplaced))
+                                 kind: state.liveChat == nil ? .slotOpened : .slotReplaced,
+                                 sessionID: chat.sessionKey))
     state.liveChat = chat
     state.path.removeAll()
     if state.layout == .compact {

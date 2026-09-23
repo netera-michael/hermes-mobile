@@ -1015,9 +1015,10 @@ public struct ChatFeature {
 
   public init() {}
 
-  private func trace(_ kind: ConnectionTraceKind, rowCount: Int? = nil) {
+  private func trace(_ kind: ConnectionTraceKind, state: State, rowCount: Int? = nil) {
     connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
-                                 kind: kind, rowCount: rowCount))
+                                 kind: kind, sessionID: state.liveSessionID ?? state.sessionKey,
+                                 rowCount: rowCount))
   }
 
   public var body: some ReducerOf<Self> {
@@ -1045,7 +1046,7 @@ public struct ChatFeature {
         // which must not cancel-and-redial a healthy socket.
         guard !state.hasStarted else { return .none }
         state.hasStarted = true
-        trace(.socketDial)
+        trace(.socketDial, state: state)
         // Seed the display prefs (#55) on the FIRST appearance only, right where the slot
         // starts — a re-appearance over a live slot must not reload them (they're already
         // in state, and a reload would fight a toggle the user just made). `AppFeature`
@@ -1063,7 +1064,7 @@ public struct ChatFeature {
         return releaseVoiceResources(&state)
 
       case .teardown:
-        trace(.socketSuspended)
+        trace(.socketSuspended, state: state)
         return .merge(
           releaseVoiceResources(&state),
           .cancel(id: CancelID.socket),
@@ -1086,7 +1087,7 @@ public struct ChatFeature {
         // teardown could otherwise act on a socket we just chose to drop (e.g. redial
         // while backgrounded after grace expiry, wasting a single-use ws-ticket).
         state.status = .reconnecting
-        trace(.socketSuspended)
+        trace(.socketSuspended, state: state)
         state.hasRequestedSession = false
         return .merge(
           .cancel(id: CancelID.socket),
@@ -1105,7 +1106,7 @@ public struct ChatFeature {
         return .none
 
       case let .gatewayEvent(event):
-        if case .ready = event { trace(.socketReady) }
+        if case .ready = event { trace(.socketReady, state: state) }
         // Snapshot whether the user is parked at the bottom window *before* the fold appends any
         // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
         let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
@@ -1121,7 +1122,7 @@ public struct ChatFeature {
         return .merge(effect, debouncedPersist())
 
       case .gatewayClosed:
-        trace(.socketClosed)
+        trace(.socketClosed, state: state)
         state.hasRequestedSession = false
         // Finalize anything mid-stream so a dropped socket doesn't leave a row
         // spinning forever; the transcript itself persists across the reconnect.
@@ -1131,7 +1132,7 @@ public struct ChatFeature {
         guard !state.awaitingReauth else { return .cancel(id: CancelID.thinkingTimer) }
         state.status = .reconnecting
         state.reconnectAttempt += 1
-        trace(.reconnectScheduled)
+        trace(.reconnectScheduled, state: state)
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
@@ -1143,7 +1144,7 @@ public struct ChatFeature {
         )
 
       case .reconnectTick:
-        trace(.socketDial)
+        trace(.socketDial, state: state)
         return connect(state.connection)
 
       case let .resumeAfterReauth(connection):
@@ -1160,7 +1161,7 @@ public struct ChatFeature {
         )
 
       case let .sessionResult(.success(handle)):
-        trace(.hydrateSucceeded, rowCount: state.transcript.count)
+        trace(.hydrateSucceeded, state: state, rowCount: state.transcript.count)
         // `session.create` only — a fresh session has no context yet, so no usage fetch.
         // (Re-hydration of a stored session goes through `.activateResult` instead.)
         state.liveSessionID = handle.sessionID
@@ -1180,7 +1181,7 @@ public struct ChatFeature {
         return .none
 
       case let .sessionResult(.failure(error)):
-        trace(.hydrateFailed)
+        trace(.hydrateFailed, state: state)
         // A dropped socket (e.g. lock/unlock) reconnects on its own — the `.reconnecting`
         // status conveys it; don't raise a banner that would linger past reconnect. Surface
         // only real protocol/server failures.
@@ -1195,7 +1196,7 @@ public struct ChatFeature {
         return applyActivate(response, into: &state)
 
       case let .activateResult(.failure(error)):
-        trace(.hydrateFailed)
+        trace(.hydrateFailed, state: state)
         // Structural fix (2026-07-24 review) — see the `hasReplayedBranchSeed`/probe doc
         // comment on `State` for the full invariant. Before ever assuming an unpersisted
         // branch was never prompted, probe once PER NOT-FOUND EVENT (no spend/refund
@@ -1320,7 +1321,7 @@ public struct ChatFeature {
         }
         state.hasRequestedSession = true
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
-        trace(.hydrateStarted)
+        trace(.hydrateStarted, state: state)
         return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
       case .composerSubmitted:
@@ -2342,7 +2343,7 @@ public struct ChatFeature {
       // re-hydrate server-authoritatively via the unified `hydrate` path.
       if let stored = state.storedSessionID {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
-        trace(.hydrateStarted)
+        trace(.hydrateStarted, state: state)
         return hydrate(sessionID: stored, profile: state.scopedProfile)
       }
       // A standing branch seed with no stored id (an interrupted replay on a branch
@@ -3046,7 +3047,7 @@ public struct ChatFeature {
     // reconciled thinking row) so the count is final.
     state.windowStart = State.bottomWindowStart(count: state.transcript.count)
 
-    trace(.hydrateSucceeded, rowCount: state.transcript.count)
+    trace(.hydrateSucceeded, state: state, rowCount: state.transcript.count)
     // Persist the freshly-hydrated, server-authoritative state back to the cache so the next
     // cold open paints from it (debounced — coalesces with any immediately-following deltas).
     let persist = debouncedPersist()
@@ -3398,7 +3399,7 @@ public struct ChatFeature {
       return .merge(anchor, .run { [gateway, uuid, connectionTrace] send in
         let sendID = UUID()
         connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                     sendID: sendID, kind: .sendStarted))
+                                     sendID: sendID, kind: .sendStarted, sessionID: sessionID))
         // The uploads + submit target the live id, which can be stale after a
         // background→foreground; self-heal the whole upload→submit sequence once on a
         // "session not found" by re-resuming for a fresh id and replaying (#17). The
@@ -3425,7 +3426,7 @@ public struct ChatFeature {
             branchSeed: seed, profile: profile, gateway: gateway, send: send
           )
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: .sendAccepted))
+                                       sendID: sendID, kind: .sendAccepted, sessionID: sessionID))
           // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
           // fall back to their names when there's no typed text.
           let images = attachments.filter { $0.kind == .image }.map(\.data)
@@ -3439,7 +3440,7 @@ public struct ChatFeature {
                                        sendID: sendID,
                                        kind: error.isTimedOut ? .sendTimedOut
                                          : (error.isDisconnected || error == .notConnected
-                                            ? .sendDisconnected : .sendRejected)))
+                                            ? .sendDisconnected : .sendRejected), sessionID: sessionID))
           // An old agent without the byte-upload methods → gate the feature off.
           if error.isUnknownMethod {
             await send(.attachmentsUnsupportedDetected)
@@ -3448,7 +3449,7 @@ public struct ChatFeature {
           }
         } catch {
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: .sendDisconnected))
+                                       sendID: sendID, kind: .sendDisconnected, sessionID: sessionID))
           await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
         }
       })
@@ -3581,13 +3582,13 @@ public struct ChatFeature {
     return .merge(anchor, .run { [gateway, connectionTrace, now] send in
       let sendID = UUID()
       connectionTrace.append(.init(timestamp: now, generation: generation,
-                                   sendID: sendID, kind: .sendStarted))
+                                   sendID: sendID, kind: .sendStarted, sessionID: sessionID))
       await submitPrompt(
         sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
         profile: profile, gateway: gateway, send: send,
         outcome: { kind in
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: kind))
+                                       sendID: sendID, kind: kind, sessionID: sessionID))
         }
       ) { healedID in
         _ = try await gateway.send("prompt.submit", .object([
