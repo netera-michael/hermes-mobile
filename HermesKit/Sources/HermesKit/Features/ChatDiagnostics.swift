@@ -2,15 +2,19 @@ extension ChatFeature {
   /// Pattern matching deliberately ignores every associated payload.
   static func diagnosticSignal(for action: Action) -> DiagnosticSignal? {
     switch action {
-    case .gatewayEvent(.ready): .connectionReady
-    case .gatewayEvent(.error): .connectionFailed
-    case .sessionResult(.success), .activateResult(.success): .sessionOpened
-    case .sessionResult(.failure), .activateResult(.failure): .sessionFailed
-    case .gatewayEvent(.messageStart): .sendStarted
-    case .promptSubmitFailed: .sendFailed
-    case .modelSelected: .modelChanged
-    case .configSetFailed: .modelChangeFailed
-    default: nil
+    case let .gatewayEvent(frame):
+      switch frame.event {
+      case .ready: return .connectionReady
+      case .error: return .connectionFailed
+      case .messageStart: return .sendStarted
+      default: return nil
+      }
+    case .sessionResult(.success), .activateResult(.success): return .sessionOpened
+    case .sessionResult(.failure), .activateResult(.failure): return .sessionFailed
+    case .promptSubmitFailed: return .sendFailed
+    case .modelSelected: return .modelChanged
+    case .configSetFailed: return .modelChangeFailed
+    default: return nil
     }
   }
 }

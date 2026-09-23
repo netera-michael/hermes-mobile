@@ -87,7 +87,7 @@ private func requestID(_ frame: String) -> Int? {
     transport.inject(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s","payload":{"text":"hi"}}}"#)
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .messageDelta(text: "hi"))
+    #expect(await iterator.next()?.event == .messageDelta(text: "hi"))
   }
 
   @Test func multipleNewlineDelimitedFramesInOneMessage() async throws {
@@ -102,8 +102,8 @@ private func requestID(_ frame: String) -> Int? {
     )
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .messageDelta(text: "a"))
-    #expect(await iterator.next() == .messageDelta(text: "b"))
+    #expect(await iterator.next()?.event == .messageDelta(text: "a"))
+    #expect(await iterator.next()?.event == .messageDelta(text: "b"))
   }
 
   @Test func errorResponseThrows() async throws {
@@ -330,7 +330,7 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .cookie(CookieSession(cookies: [], username: "u", provider: "basic")))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .authExpired)
+    #expect(await iterator.next()?.event == .authExpired)
     #expect(await iterator.next() == nil) // then finished
     #expect(built.value == false)         // no socket was opened
   }
@@ -443,7 +443,7 @@ private func requestID(_ frame: String) -> Int? {
     let stream = client.connect(url, .bearer(bearerSession))
 
     var iterator = stream.makeAsyncIterator()
-    #expect(await iterator.next() == .authExpired)
+    #expect(await iterator.next()?.event == .authExpired)
     #expect(await iterator.next() == nil) // then finished
     #expect(built.value == false)         // no socket was opened
   }

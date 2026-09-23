@@ -486,6 +486,13 @@ public struct ChatFeature {
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
     var hasRequestedSession: Bool
+    /// Lossless reconnect: the most recent per-session sequence number received from the
+    /// gateway. Reset to `nil` when the session changes or the epoch changes. Used to issue
+    /// `session.events.since` on reconnect.
+    public var lastSeenSeq: Int?
+    /// Lossless reconnect: the server process's replay epoch (a uuid that changes on gateway
+    /// restart, resetting all sequence counters). Captured from `gateway.ready`.
+    public var replayEpoch: String?
     /// Set by the first `.task` (the initial connect). The view's `.task` fires on EVERY
     /// appearance — including re-appearing over a LIVE slot after a nav pop — and an
     /// unconditional `connect` there would cancel-and-redial a healthy socket (the dial
@@ -552,6 +559,8 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
+      self.lastSeenSeq = nil
+      self.replayEpoch = nil
       self.hasStarted = false
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
@@ -735,7 +744,7 @@ public struct ChatFeature {
     /// rows from the in-memory transcript (client-side only — no network call).
     case loadOlderRequested
     case thinkingTick
-    case gatewayEvent(GatewayEvent)
+    case gatewayEvent(GatewayFrame)
     case gatewayClosed
     case reconnectTick
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
@@ -1105,8 +1114,19 @@ public struct ChatFeature {
         state.thinkingSeconds += 1
         return .none
 
-      case let .gatewayEvent(event):
-        if case .ready = event { trace(.socketReady, state: state) }
+      case let .gatewayEvent(frame):
+        let event = frame.event
+        if case .ready = event {
+          trace(.socketReady, state: state)
+          // Capture the server's replay epoch on the first ready after connect.
+          if let epoch = frame.replayEpoch {
+            state.replayEpoch = epoch
+          }
+        }
+        // Track per-session sequence numbers for replay gap detection.
+        if let seq = frame.seq, frame.sessionID == state.sessionKey {
+          state.lastSeenSeq = seq
+        }
         // Snapshot whether the user is parked at the bottom window *before* the fold appends any
         // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
         let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
@@ -2745,9 +2765,9 @@ public struct ChatFeature {
     .run { [gateway, debugLog] send in
       // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
       // fresh single-use ws-ticket per connect. A dead session surfaces as `.authExpired`.
-      for await event in gateway.connect(connection.baseURL, connection.auth) {
-        debugLog.append(event) // mirror into the app-wide debug buffer (Task 12)
-        await send(.gatewayEvent(event))
+      for await frame in gateway.connect(connection.baseURL, connection.auth) {
+        debugLog.append(frame.event) // mirror into the app-wide debug buffer (Task 12)
+        await send(.gatewayEvent(frame))
       }
       await send(.gatewayClosed)
     }

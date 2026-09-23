@@ -134,8 +134,8 @@ public struct JSONRPCRequest: Encodable, Equatable, Sendable {
 /// (Task 5). This decodes exactly one frame and never throws on an unknown event
 /// `type` — unknown events surface as `GatewayEvent.unknown`.
 public enum InboundFrame: Equatable, Sendable {
-  /// A server-pushed event notification: `{method:"event", params:{type, session_id, payload}}`.
-  case event(sessionID: String?, GatewayEvent)
+  /// A server-pushed event notification: `{method:"event", params:{type, session_id, seq?, payload}}`.
+  case event(GatewayFrame)
   /// A successful response to a request we sent: `{id, result}`.
   case response(id: Int, result: JSONValue)
   /// An error response: `{id, error:{message}}`.
@@ -147,9 +147,11 @@ public enum InboundFrame: Equatable, Sendable {
     let frame = try JSONDecoder().decode(JSONValue.self, from: data)
 
     if frame["method"]?.stringValue == "event", let params = frame["params"] {
-      let type = params["type"]?.stringValue ?? ""
-      let sessionID = params["session_id"]?.stringValue
-      self = .event(sessionID: sessionID, GatewayEvent(type: type, payload: params["payload"]))
+      if let gatewayFrame = GatewayFrame(eventObject: params) {
+        self = .event(gatewayFrame)
+      } else {
+        self = .ignored
+      }
       return
     }
 

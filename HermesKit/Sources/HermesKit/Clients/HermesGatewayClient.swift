@@ -22,7 +22,7 @@ public struct HermesGatewayClient: Sendable {
   ///   `Authorization: Bearer` from `BearerTokenStore` (which refreshes first when the
   ///   access token is inside its leeway). The WS URL is then identical to the cookie
   ///   regime's — the gateway accepts a ticket regardless of how it was minted.
-  public var connect: @Sendable (_ baseURL: URL, _ auth: AuthSession) -> AsyncStream<GatewayEvent> = { _, _ in
+  public var connect: @Sendable (_ baseURL: URL, _ auth: AuthSession) -> AsyncStream<GatewayFrame> = { _, _ in
     AsyncStream { $0.finish() }
   }
   /// Send a JSON-RPC request on the current connection and await its result.
@@ -196,7 +196,7 @@ public extension HermesGatewayClient {
     let store = ConnectionStore()
     return HermesGatewayClient(
       connect: { baseURL, auth in
-        let (stream, continuation) = AsyncStream<GatewayEvent>.makeStream()
+        let (stream, continuation) = AsyncStream<GatewayFrame>.makeStream()
         // The connection opened by this `connect` (set once the transport is built). Held in
         // a box so the single `onTermination` handler can shut it down — `onTermination` is
         // last-writer-wins, so we must NOT overwrite it per-open (that clobbers cleanup).
@@ -250,7 +250,7 @@ public extension HermesGatewayClient {
               continuation.finish()
             } catch GatewayError.authExpired {
               // Session fully dead → non-retryable. Signal re-auth and finish.
-              continuation.yield(.authExpired)
+              continuation.yield(GatewayFrame(.authExpired))
               continuation.finish()
             } catch {
               // Transient mint failure → finish like a dropped socket; the reducer's
@@ -299,7 +299,7 @@ public extension DependencyValues {
 /// the receive loop that routes frames to either the event stream or a waiting `send`.
 actor GatewayConnection {
   private let transport: any WebSocketTransport
-  private let events: AsyncStream<GatewayEvent>.Continuation
+  private let events: AsyncStream<GatewayFrame>.Continuation
   private let requestTimeout: Duration
   private let longRequestTimeout: Duration
   private let clock: any Clock<Duration>
@@ -311,7 +311,7 @@ actor GatewayConnection {
 
   init(
     transport: any WebSocketTransport,
-    events: AsyncStream<GatewayEvent>.Continuation,
+    events: AsyncStream<GatewayFrame>.Continuation,
     requestTimeout: Duration = .seconds(30),
     longRequestTimeout: Duration = .seconds(120),
     clock: any Clock<Duration> = ContinuousClock()
@@ -405,8 +405,8 @@ actor GatewayConnection {
   private func handle(frame: String) {
     guard let parsed = try? InboundFrame(data: Data(frame.utf8)) else { return }
     switch parsed {
-    case let .event(_, event):
-      events.yield(event)
+    case let .event(frame):
+      events.yield(frame)
     case let .response(id, result):
       cancelTimeout(id)
       pending.removeValue(forKey: id)?.resume(returning: result)

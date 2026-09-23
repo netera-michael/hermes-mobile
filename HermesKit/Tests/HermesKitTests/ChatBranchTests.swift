@@ -902,7 +902,7 @@ struct ChatBranchTests {
   /// `.gatewayClosed` for minutes) — keep the seed, refund the budget, and redial
   /// ourselves so the chat isn't stranded in `.reconnecting` with the seed parked.
   @Test func replayTimeoutKeepsSeedAndRedials() async {
-    let continuation = LockIsolated<AsyncStream<GatewayEvent>.Continuation?>(nil)
+    let continuation = LockIsolated<AsyncStream<GatewayFrame>.Continuation?>(nil)
     let dialed = LockIsolated(false)
     var initial = ChatFeature.State(connection: conn, resumeStoredID: "branch-stored", status: .ready)
     initial.attachLiveSessionID = "branch-live"
@@ -916,7 +916,7 @@ struct ChatBranchTests {
       }
       $0.hermesGateway.connect = { @Sendable _, _ in
         dialed.setValue(true)
-        let (stream, cont) = AsyncStream<GatewayEvent>.makeStream()
+        let (stream, cont) = AsyncStream<GatewayFrame>.makeStream()
         continuation.setValue(cont) // hold the socket open — the fresh `.ready` is live's
         return stream
       }

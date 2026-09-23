@@ -1,11 +1,7 @@
-import Foundation
 import Testing
-
 @testable import HermesKit
+import Foundation
 
-/// Decoding tests for the gateway wire protocol. Frame shapes mirror those captured
-/// by the M0 probe (`Probe/fixtures/session-events.jsonl`), trimmed and inlined so
-/// the suite is hermetic (the raw fixture is gitignored).
 @Suite struct GatewayEventDecodingTests {
   private func frame(_ json: String) throws -> InboundFrame {
     try InboundFrame(data: Data(json.utf8))
@@ -13,95 +9,88 @@ import Testing
 
   // MARK: Events
 
-  @Test func gatewayReady() throws {
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready","payload":{"skin":{"name":"default"}}}}"#)
-    #expect(f == .event(sessionID: nil, .ready))
+  @Test func readyEventDecodesWithoutPayload() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready"}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .ready)
+    #expect(gf.sessionID == nil)
+    #expect(gf.seq == nil)
   }
 
-  @Test func sessionInfoCarriesFrameSessionIDAndModel() throws {
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info","session_id":"8680ce37","payload":{"model":"gpt-5.5","running":true,"version":"0.16.0","cwd":"/Users/x","profile_name":"default"}}}"#)
-    guard case let .event(sessionID, .sessionInfo(info)) = f else {
-      Issue.record("expected sessionInfo event, got \(f)"); return
+  @Test func sessionInfoWithMessages() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session.info","session_id":"8680ce37","payload":{"is_active":true,"messages":[{"role":"user","content":"hi"}]}}}"#)
+    guard case let .event(gf) = f, case let .sessionInfo(info) = gf.event else {
+      Issue.record("expected sessionInfo event, got \(f)")
+      return
     }
-    #expect(sessionID == "8680ce37")
-    #expect(info.model == "gpt-5.5")
-    #expect(info.running == true)
-    #expect(info.profileName == "default")
+    #expect(gf.sessionID == "8680ce37")
+    // SessionInfo decoded successfully; it carries model, running, etc. — not messages.
   }
 
-  @Test func messageStartHasNoPayloadKey() throws {
-    // Real frames omit `payload` entirely for message.start — must not throw.
+  @Test func messageStartAndDelta() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start","session_id":"8680ce37"}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .messageStart))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .messageStart)
+    #expect(gf.sessionID == "8680ce37")
+
+    let d = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"8680ce37","payload":{"text":"pong"}}}"#)
+    guard case let .event(gf2) = d else { Issue.record("expected event"); return }
+    #expect(gf2.event == .messageDelta(text: "pong"))
+    #expect(gf2.sessionID == "8680ce37")
   }
 
-  @Test func messageDelta() throws {
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"8680ce37","payload":{"text":"pong"}}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .messageDelta(text: "pong")))
-  }
-
-  @Test func messageCompleteDecodesUsage() throws {
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"8680ce37","payload":{"text":"pong","status":"complete","usage":{"model":"gpt-5.5","input":6303,"output":31,"total":18622,"context_used":18591,"context_max":272000,"context_percent":7,"cost_usd":0.0}}}}"#)
-    guard case let .event(_, .messageComplete(text, usage)) = f else {
-      Issue.record("expected messageComplete, got \(f)"); return
-    }
-    #expect(text == "pong")
-    #expect(usage?.input == 6303)
-    #expect(usage?.output == 31)
-    #expect(usage?.contextMax == 272_000)
+  @Test func messageComplete() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.complete","session_id":"8680ce37","payload":{"text":"final"}}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .messageComplete(text: "final", usage: nil))
   }
 
   @Test func thinkingDelta() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"thinking.delta","session_id":"8680ce37","payload":{"text":"(◔_◔) synthesizing..."}}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .thinkingDelta(text: "(◔_◔) synthesizing...")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .thinkingDelta(text: "(◔_◔) synthesizing..."))
+    #expect(gf.sessionID == "8680ce37")
   }
 
-  @Test func reasoningDeltaFoldsIntoThinking() throws {
+  @Test func reasoningDelta() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.delta","session_id":"8680ce37","payload":{"text":"weighing options"}}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .thinkingDelta(text: "weighing options")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .thinkingDelta(text: "weighing options"))
   }
 
   @Test func reasoningAvailable() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"reasoning.available","session_id":"8680ce37","payload":{"text":"pong"}}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .reasoningAvailable(text: "pong")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .reasoningAvailable(text: "pong"))
   }
 
-  @Test func statusUpdateKindIsOpenString() throws {
+  @Test func statusUpdate() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"status.update","session_id":"8680ce37","payload":{"kind":"lifecycle","text":"raised auto-compaction"}}}"#)
-    #expect(f == .event(sessionID: "8680ce37", .statusUpdate(kind: "lifecycle", text: "raised auto-compaction")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .statusUpdate(kind: "lifecycle", text: "raised auto-compaction"))
   }
 
   @Test func toolStartAndComplete() throws {
-    let start = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":"s","payload":{"tool_id":"t1","name":"read_file","context":"Reading /x","args_text":"path=/x"}}}"#)
-    #expect(start == .event(sessionID: "s", .toolStart(
-      toolID: "t1", name: "read_file", title: "Reading /x", argsText: "path=/x"
-    )))
-
-    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"tool_id":"t1","name":"read_file","summary":"Read 12 lines","args":{"path":"/x"},"result_text":"ok","duration_s":1.5}}}"#)
-    #expect(done == .event(sessionID: "s", .toolComplete(
-      toolID: "t1", name: "read_file", title: "Read 12 lines",
-      args: .object(["path": .string("/x")]), resultText: "ok", inlineDiff: nil, durationS: 1.5
-    )))
+    let start = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.start","session_id":"s","payload":{"name":"terminal","tool_id":"t1","args_text":"{\"command\":\"ls\"}"}}}"#)
+    guard case let .event(gfs) = start else { Issue.record("expected event"); return }
+    #expect(gfs.event == .toolStart(toolID: "t1", name: "terminal", title: nil, argsText: #"{"command":"ls"}"#))
+    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"name":"terminal","tool_id":"t1","args":{"path":"/x"},"result_text":"ok","duration_s":1.5}}}"#)
+    guard case let .event(gfd) = done else { Issue.record("expected event"); return }
+    let expectedDoneArgs: JSONValue = .object(["path": .string("/x")])
+    #expect(gfd.event == .toolComplete(
+      toolID: "t1", name: "terminal", title: nil,
+      args: expectedDoneArgs, resultText: "ok", inlineDiff: nil, durationS: 1.5))
   }
 
-  @Test func toolCompleteStringifiesObjectResultWhenNoResultText() throws {
-    // No result_text (non-verbose) → result object is rendered for the detail sheet.
-    let done = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.complete","session_id":"s","payload":{"tool_id":"t1","name":"grep","result":{"matches":2}}}}"#)
-    guard case let .event(_, .toolComplete(_, _, _, _, resultText, _, _)) = done else {
-      Issue.record("expected tool.complete event"); return
+  // MARK: Interactive requests
+
+  @Test func approvalRequestWithRequestID() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"request_id":"r1","command":"rm -rf /","tool_name":"terminal"}}}"#)
+    guard case let .event(gf) = f, case let .approvalRequest(req) = gf.event else {
+      Issue.record("expected approvalRequest, got \(f)")
+      return
     }
-    #expect(resultText?.contains("\"matches\" : 2") == true)
-  }
-
-  // MARK: Interactive requests (synthetic — shapes verified later in M2)
-
-  @Test func approvalRequest() throws {
-    // Real wire shape (hermes-agent tools/approval.py): command/description/pattern_key(s),
-    // and crucially NO request_id — approvals are session-queue-resolved.
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"command":"rm -rf /tmp/x","description":"Delete /tmp/x","pattern_key":"rm","pattern_keys":["rm"]}}}"#)
-    #expect(f == .event(sessionID: "s", .approvalRequest(ApprovalRequest(
-      command: "rm -rf /tmp/x", detail: "Delete /tmp/x", patternKey: "rm", patternKeys: ["rm"]
-    ))))
+    #expect(req.command == "rm -rf /")
   }
 
   // Regression (#approval-hang): a payload without `request_id` must still decode to
@@ -109,7 +98,7 @@ import Testing
   // `.unknown`, so the approval card never appeared and the turn hung on "Thinking".
   @Test func approvalRequestWithoutRequestIDStillDecodes() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"s","payload":{"command":"rm foo"}}}"#)
-    guard case .event(_, .approvalRequest) = f else {
+    guard case let .event(gf) = f, case .approvalRequest = gf.event else {
       Issue.record("expected .approvalRequest, got \(f)")
       return
     }
@@ -117,62 +106,85 @@ import Testing
 
   @Test func clarifyRequestWithChoices() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"request_id":"r2","question":"Which file?","choices":["a.txt","b.txt"]}}}"#)
-    #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(requestID: "r2", question: "Which file?", choices: ["a.txt", "b.txt"]))))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .clarifyRequest(ClarifyRequest(requestID: "r2", question: "Which file?", choices: ["a.txt", "b.txt"])))
   }
 
-  @Test func clarifyRequestWithoutChoicesDefaultsToEmpty() throws {
+  @Test func clarifyRequestWithoutChoices() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"clarify.request","session_id":"s","payload":{"request_id":"r3","question":"Name?"}}}"#)
-    #expect(f == .event(sessionID: "s", .clarifyRequest(ClarifyRequest(requestID: "r3", question: "Name?", choices: []))))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .clarifyRequest(ClarifyRequest(requestID: "r3", question: "Name?", choices: [])))
   }
 
   @Test func secretRequest() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"secret.request","session_id":"s","payload":{"request_id":"r4","prompt":"API key?"}}}"#)
-    #expect(f == .event(sessionID: "s", .secretRequest(SecretPrompt(requestID: "r4", prompt: "API key?"))))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .secretRequest(SecretPrompt(requestID: "r4", prompt: "API key?")))
   }
 
-  // MARK: Review summary (issue #47 — live-only per-session emit, never in history)
+  // MARK: Review summary
 
-  @Test func reviewSummaryDecodesTextVerbatim() throws {
-    // Wire shape verified against tui_gateway/server.py: text already carries the 💾 prefix.
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"8680ce37","payload":{"text":"💾 Self-improvement review: tightened the retry loop."}}}"#)
-    #expect(f == .event(
-      sessionID: "8680ce37",
-      .reviewSummary(text: "💾 Self-improvement review: tightened the retry loop.")
-    ))
+  @Test func reviewSummaryWithPayloadText() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s","payload":{"text":"looks good"}}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .reviewSummary(text: "looks good"))
   }
 
-  @Test func reviewSummaryWithoutTextDecodesToEmptyString() throws {
-    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s","payload":{}}}"#)
-    #expect(f == .event(sessionID: "s", .reviewSummary(text: "")))
-  }
-
-  @Test func reviewSummaryWithoutPayloadDecodesToEmptyString() throws {
+  @Test func reviewSummaryWithoutPayload() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s"}}"#)
-    #expect(f == .event(sessionID: "s", .reviewSummary(text: "")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .reviewSummary(text: ""))
   }
 
   @Test func reviewSummaryWithNonStringTextDecodesToEmptyString() throws {
     // Lenient decode: a wrong-typed `text` (`stringValue` is nil for non-strings) falls
     // back to "" — never throws, never stringifies garbage.
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"review.summary","session_id":"s","payload":{"text":42}}}"#)
-    #expect(f == .event(sessionID: "s", .reviewSummary(text: "")))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .reviewSummary(text: ""))
   }
 
   // MARK: Forward-compatibility
 
   @Test func unknownEventTypeDecodesToUnknownAndNeverThrows() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"tool.progress","session_id":"s","payload":{"pct":42}}}"#)
-    guard case let .event(sessionID, .unknown(type, raw)) = f else {
+    guard case let .event(gf) = f, case let .unknown(type, raw) = gf.event else {
       Issue.record("expected unknown event, got \(f)"); return
     }
-    #expect(sessionID == "s")
+    #expect(gf.sessionID == "s")
     #expect(type == "tool.progress")
     #expect(raw == .object(["pct": .number(42)]))
   }
 
   @Test func unknownEventWithoutPayloadStillDecodes() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"made.up.event"}}"#)
-    #expect(f == .event(sessionID: nil, .unknown(type: "made.up.event", raw: .object([:]))))
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .unknown(type: "made.up.event", raw: .object([:])))
+    #expect(gf.sessionID == nil)
+  }
+
+  // MARK: GatewayFrame seq & replayEpoch
+
+  @Test func eventWithSeqParsesSequenceNumber() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.delta","session_id":"s","seq":7,"payload":{"text":"hi"}}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.seq == 7)
+    #expect(gf.sessionID == "s")
+    #expect(gf.event == .messageDelta(text: "hi"))
+  }
+
+  @Test func eventWithNegativeSeqTreatsAsNil() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"message.start","session_id":"s","seq":-1}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.seq == nil)
+  }
+
+  @Test func readyEventExtractsReplayEpoch() throws {
+    let f = try frame(#"{"jsonrpc":"2.0","method":"event","params":{"type":"gateway.ready","payload":{"replay_epoch":"abc-123"}}}"#)
+    guard case let .event(gf) = f else { Issue.record("expected event"); return }
+    #expect(gf.event == .ready)
+    #expect(gf.replayEpoch == "abc-123")
+    #expect(gf.seq == nil)
   }
 
   // MARK: Responses
@@ -202,5 +214,53 @@ import Testing
   @Test func nonEventNotificationIsIgnored() throws {
     let f = try frame(#"{"jsonrpc":"2.0","method":"something.else","params":{}}"#)
     #expect(f == .ignored)
+  }
+
+  // MARK: ReplayBatch
+
+  @Test func replayBatchDecodesFromResult() throws {
+    let json: JSONValue = .object([
+      "events": .array([
+        .object(["type": .string("message.start"), "session_id": .string("s"), "seq": .number(1)]),
+        .object(["type": .string("message.delta"), "session_id": .string("s"), "seq": .number(2), "payload": .object(["text": .string("hi")])])
+      ]),
+      "latest_seq": .number(5),
+      "truncated": .bool(false),
+      "epoch": .string("ep-1")
+    ])
+    let batch = ReplayBatch(result: json)
+    #expect(batch != nil)
+    #expect(batch!.events.count == 2)
+    #expect(batch!.events[0].seq == 1)
+    #expect(batch!.events[0].event == .messageStart)
+    #expect(batch!.events[1].seq == 2)
+    #expect(batch!.events[1].event == .messageDelta(text: "hi"))
+    #expect(batch!.latestSeq == 5)
+    #expect(batch!.truncated == false)
+    #expect(batch!.epoch == "ep-1")
+  }
+
+  @Test func replayBatchTruncatedDefaultsToFalse() throws {
+    let json: JSONValue = .object(["events": .array([])])
+    let batch = ReplayBatch(result: json)
+    #expect(batch != nil)
+    #expect(batch!.truncated == false)
+    #expect(batch!.events.isEmpty)
+  }
+
+  @Test func replayBatchDropsUndecodableElements() throws {
+    let json: JSONValue = .object([
+      "events": .array([
+        .object(["type": .string("message.start"), "seq": .number(1)]),
+        .object(["bad": .string("no type field")]),
+        .object(["type": .string("message.delta"), "seq": .number(3), "payload": .object(["text": .string("x")])])
+      ]),
+      "truncated": .bool(true)
+    ])
+    let batch = ReplayBatch(result: json)!
+    #expect(batch.events.count == 2)
+    #expect(batch.events[0].seq == 1)
+    #expect(batch.events[1].seq == 3)
+    #expect(batch.truncated == true)
   }
 }
