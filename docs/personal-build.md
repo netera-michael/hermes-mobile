@@ -49,6 +49,12 @@ DEVELOPMENT_TEAM=<team-id> \
 Unset = upstream behavior. A plain `tuist generate` / simulator `make run` builds the
 author's bundle id with push intact — upstream PRs stay clean of this file entirely.
 
+## Optional personal diagnostics
+
+Sentry is disabled unless `TUIST_SENTRY_DSN` is supplied at generation time.
+See [the privacy contract and symbol-upload workflow](features/personal-diagnostics.md).
+Never put a Sentry auth token in the app or tracked configuration.
+
 ## Limits of free signing
 
 - App stops launching after **7 days** → re-run `make run-device` (~2 min, same WiFi ok).

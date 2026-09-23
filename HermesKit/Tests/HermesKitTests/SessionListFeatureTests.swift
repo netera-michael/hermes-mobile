@@ -3197,6 +3197,7 @@ struct SessionListFeatureTests {
 
     await store.send(.setSessionRunning(id: "s1", running: false)) {
       $0.sessions[id: "s1"]?.isActive = false
+      $0.stoppedBaselines = ["s1": StoppedBaseline()]
     }
   }
 
@@ -3281,5 +3282,95 @@ struct SessionListFeatureTests {
     }
 
     await store.send(.onDisappear)
+  }
+}
+
+extension SessionListFeatureTests {
+  // Authoritative stop wins over the 300-second recent-activity heuristic: after the
+  // open chat reports `runningChanged(false)`, a poll with no fresher row activity
+  // must not resurrect the Working glow.
+  @Test func pollDoesNotResurrectAuthoritativeStop() async {
+    let clock = TestClock()
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "s1", messageCount: 4, isActive: true)]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = clock
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        [Session(id: "s1", messageCount: 4, isActive: true)]
+      }
+    }
+
+    await store.send(.setSessionRunning(id: "s1", running: false)) {
+      $0.sessions[id: "s1"]?.isActive = false
+      $0.stoppedBaselines = ["s1": StoppedBaseline(messageCount: 4)]
+    }
+
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.isLoading = true
+      $0.now = now
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1", messageCount: 4, isActive: false)]
+      $0.seenCounts = ["s1": 4]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
+  }
+
+  // Fresher row activity is a genuine restart elsewhere: it clears the stop baseline
+  // and lets the poll light the glow again.
+  @Test func pollRelightsOnGenuineRestartElsewhere() async {
+    let clock = TestClock()
+    let count = LockIsolated(4)
+    let store = TestStore(
+      initialState: SessionListFeature.State(
+        connection: connection,
+        sessions: [Session(id: "s1", messageCount: 4, isActive: true)]
+      )
+    ) {
+      SessionListFeature()
+    } withDependencies: {
+      $0.date = .constant(now)
+      $0.continuousClock = clock
+      $0.hermesProfiles.list = { @Sendable _ in throw RESTError.notFound }
+      $0.hermesREST.pushPluginStatus = { @Sendable _ in .unknown }
+      $0.hermesREST.cronJobs = { @Sendable _, _ in throw RESTError.notFound }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in
+        [Session(id: "s1", messageCount: count.value, isActive: true)]
+      }
+    }
+
+    await store.send(.setSessionRunning(id: "s1", running: false)) {
+      $0.sessions[id: "s1"]?.isActive = false
+      $0.stoppedBaselines = ["s1": StoppedBaseline(messageCount: 4)]
+    }
+
+    count.setValue(5)
+    await store.send(.pollTick)
+    await store.receive(\.pulledToRefresh) {
+      $0.isLoading = true
+      $0.now = now
+    }
+    await store.receive(\.sessionsResponse.success) {
+      $0.isLoading = false
+      $0.sessions = [Session(id: "s1", messageCount: 5, isActive: true)]
+      $0.stoppedBaselines = [:]
+      $0.seenCounts = ["s1": 5]
+    }
+    await store.receive(\.cronJobsResponse.failure) {
+      $0.cronJobsSupported = false
+    }
   }
 }

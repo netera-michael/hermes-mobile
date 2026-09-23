@@ -34,6 +34,11 @@ struct SettingsView: View {
 
       Section("Connection") {
         Button("Reconnect") { store.send(.reconnectTapped) }
+        Button("Copy Connection & Send diagnostics") {
+          store.send(.copyConnectionTraceTapped)
+        }
+        Text("Copies only local timestamps, slot numbers, random send IDs, outcomes and row counts. Review before sharing.")
+          .font(.footnote).foregroundStyle(.secondary)
         NavigationLink {
           ConnectionDebugView(entries: store.log)
         } label: {

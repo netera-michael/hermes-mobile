@@ -1,0 +1,9 @@
+# Personal Connection & Send trace
+
+Fork-only, in-memory diagnostics, separate from Sentry and from the existing gateway Debug log. The latter's decoded summaries can contain message text and **must not be copied/exported** as diagnostics.
+
+Settings → Connection → **Copy Connection & Send diagnostics** copies a snapshot on tap. Review the clipboard before sharing. The buffer holds the latest 300 entries for this process only; it is not persisted, uploaded, or automatically sent. Restarting the app clears it. Each line contains a timestamp, app-owned slot generation, categorical event, optional independent random send UUID, and (for successful hydration) rendered transcript row count. No session/profile ID, URL, prompt, attachment data, token, or raw error enters the trace API. Row counts measure displayed rows, **not** independent prompt submissions.
+
+`slotCleared`/`socketSuspended` indicate deliberate teardown; `socketClosed` indicates the connect stream ended and schedules reconnect. `sendAccepted` means the `prompt.submit` RPC acknowledged, **not** that the model turn completed or the prompt was persisted. `sendTimedOut`/`sendDisconnected` are unknown server outcomes; retrying manually may submit twice. `sendRejected` is a failure classification, not an idempotency guarantee. Attachment sends are traced across upload and submit as one attempt; slash/compress commands are not prompt submissions in this trace. A server-authoritative hydrate records the resulting rendered row count. A regression test verifies that a persisted user turn duplicated by `inflight.user` now paints once (with the inflight assistant seed preserved).
+
+The existing Debug log remains visible in Settings for local inspection but is not part of Copy diagnostics. Tests cover ring-buffer order/capacity and the closed exported vocabulary. Device reproduction still needs the installed build and matching server evidence to establish causality.

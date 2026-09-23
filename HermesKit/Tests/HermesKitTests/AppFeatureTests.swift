@@ -1621,12 +1621,14 @@ struct AppFeatureTests {
     await store.send(.liveChat(.delegate(.runningChanged(sessionID: "s1", running: false))))
     await store.receive(\.home.setSessionRunning) {
       $0.home?.sessions[id: "s1"]?.isActive = false
+      $0.home?.stoppedBaselines = ["s1": StoppedBaseline()]
     }
 
     // A started turn → light it again.
     await store.send(.liveChat(.delegate(.runningChanged(sessionID: "s1", running: true))))
     await store.receive(\.home.setSessionRunning) {
       $0.home?.sessions[id: "s1"]?.isActive = true
+      $0.home?.stoppedBaselines = [:]
     }
   }
 
@@ -3980,6 +3982,7 @@ struct AppFeatureTests {
     await store.send(.liveChat(.delegate(.runningChanged(sessionID: "s1", running: false))))
     await store.receive(\.home.setSessionRunning) {
       $0.home?.sessions[id: "s1"]?.isActive = false
+      $0.home?.stoppedBaselines = ["s1": StoppedBaseline()]
     }
     // Exhaustive: no teardown chain follows.
     #expect(store.state.liveChat == chat)

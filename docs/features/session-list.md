@@ -182,7 +182,11 @@ likewise listed first (full-swipe deletes, immediately).
 and its trailing swipe buttons render as iOS's compact text capsules (the icon-over-label
 style needs a taller row). An active row keeps the existing reduce-motion-aware glow and
 replaces its trailing timestamp in-place with a mini `ProgressView` + **Working** label; the
-separate leading orange dot remains exclusively the unread marker. A content floor was tried
+separate leading orange dot remains exclusively the unread marker. **Working means
+server-confirmed running** (`runningChanged` from the open chat, or a poll row with
+fresher activity than an authoritative stop): a poll must not resurrect the glow from
+the server's 300-second recent-activity `is_active` heuristic after the open chat
+reported `runningChanged(false)` (`stoppedBaselines` in `SessionListFeature`). A content floor was tried
 twice for #73 — 48pt (~70pt cells) and
 then 44pt (+20pt over natural, shipped to TestFlight in `df56ca0`) — and **reverted both
 times** (#79: testers reported the list "way too high"). The compact list is worth more than

@@ -65,6 +65,27 @@ struct SettingsFeatureTests {
     #expect(chatSnapshot.turnAnchor("s1") == nil)
   }
 
+  @Test func copyConnectionTraceExcludesGatewayDebugPayloads() async {
+    let trace = ConnectionTraceClient.ringBuffer()
+    trace.append(.init(timestamp: Date(timeIntervalSince1970: 0), generation: 1,
+                       kind: .socketClosed))
+    let copied = LockIsolated<String?>(nil)
+    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
+      SettingsFeature()
+    } withDependencies: {
+      $0.connectionTrace = trace
+      $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
+    }
+
+    await store.send(.copyConnectionTraceTapped) {
+      $0.connectionTrace = trace.snapshot()
+    }
+    await store.finish()
+    #expect(copied.value?.contains("event=socketClosed") == true)
+    #expect(copied.value?.contains("http://mac.tailnet") == false)
+    #expect(copied.value?.contains("tok") == false)
+  }
+
   @Test func reconnectEmitsReconnectDelegate() async {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()

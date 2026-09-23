@@ -14,6 +14,8 @@ struct HermesMobileApp: App {
     #endif
     return Store(initialState: AppFeature.State()) {
       AppFeature()
+    } withDependencies: {
+      $0.diagnostics = PersonalDiagnostics.start()
     }
   }()
 

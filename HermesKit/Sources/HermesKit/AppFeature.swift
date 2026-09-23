@@ -275,6 +275,7 @@ public struct AppFeature {
   @Dependency(\.push) var push
   @Dependency(\.backgroundTask) var backgroundTask
   @Dependency(\.chatSnapshot) var chatSnapshot
+  @Dependency(\.connectionTrace) var connectionTrace
   /// Only for `releaseSlotMic` — the identity teardowns that drop the slot without a
   /// `ChatFeature.teardown` to release the mic for them.
   @Dependency(\.audioRecorder) var audioRecorder
@@ -598,6 +599,8 @@ public struct AppFeature {
       case .clearLiveChat:
         // Pop-to-list teardown completed — drop the slot state. `ifLet` auto-cancels any
         // remaining child effects on the nil-out.
+        connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
+                                     kind: .slotCleared))
         state.liveChat = nil
         return .none
 
@@ -1217,13 +1220,15 @@ public struct AppFeature {
   /// non-nil→non-nil replacement must go through the `.fillLiveChat` ACTION instead, which
   /// wraps this and adds the regular-width dial.
   private func seatLiveChat(_ chat: ChatFeature.State, into state: inout State) {
+    // Count compact switches too: the trace generation identifies a slot, not a view.
+    let generation = connectionTrace.nextSlot()
+    connectionTrace.append(.init(timestamp: Date(), generation: generation,
+                                 kind: state.liveChat == nil ? .slotOpened : .slotReplaced))
     state.liveChat = chat
     state.path.removeAll()
     if state.layout == .compact {
       state.path.append(ChatScreen.State(sessionKey: chat.sessionKey))
     } else {
-      // Regular has no marker to give the incoming chat a new view — `slotGeneration` does
-      // (`AppView` keys the detail column's `ChatView` on it).
       state.slotGeneration &+= 1
     }
   }

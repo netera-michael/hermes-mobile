@@ -21,11 +21,13 @@ let testsBundleId = Environment.testsBundleId.getString(default: "me.honcharenko
 // `HERMES_NO_PUSH=1` → `TUIST_NO_PUSH`: drop the `aps-environment` entitlement so a FREE
 // Apple ID (no Push capability) can sign. Push toggles hide (capability-gated); chat works.
 let noPush = Environment.noPush.getString(default: "") == "1"
+let sentryDSN = Environment.sentryDsn.getString(default: "")
 
 let project = Project(
   name: "HermesMobile",
   packages: [
     .local(path: "HermesKit"),
+    .remote(url: "https://github.com/getsentry/sentry-cocoa", requirement: .exact("8.56.2")),
     .remote(
       url: "https://github.com/pointfreeco/swift-snapshot-testing",
       requirement: .upToNextMajor(from: "1.17.0")
@@ -57,6 +59,7 @@ let project = Project(
           "UIInterfaceOrientationLandscapeRight",
         ],
         "HermesDefaultServerURL": .string(debugServerURL),
+        "HermesSentryDSN": .string(sentryDSN),
         // The app connects to user-specified self-hosted servers over http (Tailscale/LAN),
         // so domain-scoped ATS exceptions aren't possible — allow cleartext loads.
         "NSAppTransportSecurity": [
@@ -93,11 +96,13 @@ let project = Project(
       ]),
       dependencies: [
         .package(product: "HermesKit"),
+        .package(product: "Sentry"),
       ],
       settings: .settings(
         base: [
           "DEVELOPMENT_TEAM": .string(developmentTeam),
           "CODE_SIGN_STYLE": "Automatic",
+          "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
           "MARKETING_VERSION": "1.0",
           "CURRENT_PROJECT_VERSION": "66",
           // App Store release default — the orange "AppIcon". ONLY App Store submission

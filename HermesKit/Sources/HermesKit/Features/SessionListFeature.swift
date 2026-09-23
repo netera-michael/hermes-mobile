@@ -1,6 +1,19 @@
 import ComposableArchitecture
 import Foundation
 
+/// Authoritative stop baseline for one session row: the activity the row carried when
+/// the open chat's server-confirmed `runningChanged(false)` landed. The list's
+/// `is_active` is a 300-second recent-activity heuristic, so without this the next
+/// poll would resurrect the Working glow for a stopped-but-recent turn.
+public struct StoppedBaseline: Equatable, Sendable {
+  public var updatedAt: Date?
+  public var messageCount: Int?
+  public init(updatedAt: Date? = nil, messageCount: Int? = nil) {
+    self.updatedAt = updatedAt
+    self.messageCount = messageCount
+  }
+}
+
 /// A cron job with its run-history sessions — one row of the grouped Cron Jobs section.
 /// Built by `SessionListFeature.State.cronJobGroups`.
 public struct CronJobGroup: Equatable, Sendable, Identifiable {
@@ -111,6 +124,16 @@ public struct SessionListFeature {
     /// Job ids whose trigger/pause/resume RPC is IN FLIGHT. Transient double-fire guard
     /// (mirrors `archivingIDs`): added when the POST starts, removed on success/failure.
     public var cronActionInFlightIDs: Set<String>
+    /// Authoritative stop baselines by session id. Set by the open chat's server-confirmed
+    /// `runningChanged(false)`; while an entry stands, poll responses must not flip that
+    /// row's `isActive` back on — the list's `is_active` is only a 300-second
+    /// recent-activity heuristic, so a stopped-but-recent turn would otherwise resurrect
+    /// the Working glow on the next 10-second poll. An entry clears on the next
+    /// authoritative `runningChanged(true)`, on newer row activity (`updatedAt` or
+    /// `messageCount` advancing past the baseline — a genuine restart elsewhere), or
+    /// when the id drops out of the list. Transient and self-healing: a missed delegate
+    /// can delay at most until fresh activity or a refetch without the entry.
+    public var stoppedBaselines: [Session.ID: StoppedBaseline]
     /// Non-`nil` while the transient "Session ID copied" toast is showing. Purely transient
     /// confirmation state: raised by a copy, cleared by the timed expiry. It's a counter
     /// rather than a `Bool` so a re-copy while the toast is already up is still an
@@ -176,6 +199,7 @@ public struct SessionListFeature {
       cronJobsSupported: Bool = true,
       expandedCronJobID: String? = nil,
       cronActionInFlightIDs: Set<String> = [],
+      stoppedBaselines: [Session.ID: StoppedBaseline] = [:],
       copiedIDToastToken: Int? = nil,
       settings: SettingsFeature.State? = nil,
       addProfile: AddProfileFeature.State? = nil
@@ -209,6 +233,7 @@ public struct SessionListFeature {
       self.cronJobsSupported = cronJobsSupported
       self.expandedCronJobID = expandedCronJobID
       self.cronActionInFlightIDs = cronActionInFlightIDs
+      self.stoppedBaselines = stoppedBaselines
       self.copiedIDToastToken = copiedIDToastToken
       self.settings = settings
       self.addProfile = addProfile
@@ -663,7 +688,15 @@ public struct SessionListFeature {
         // Patch the in-memory row's working flag (drives the glow) the instant the open chat
         // tells us this session's authoritative running state changed. No-op if the session
         // isn't in the current list (e.g. archived/filtered) — the poll handles those.
+        // A stop also records a baseline so the next poll can't resurrect the glow from
+        // the server's 300-second recent-activity heuristic; a start clears it.
         guard state.sessions[id: id]?.isActive != running else { return .none }
+        if running {
+          state.stoppedBaselines.removeValue(forKey: id)
+        } else if let row = state.sessions[id: id] {
+          state.stoppedBaselines[id] = StoppedBaseline(
+            updatedAt: row.updatedAt, messageCount: row.messageCount)
+        }
         state.sessions[id: id]?.isActive = running
         return .none
 
@@ -855,6 +888,7 @@ public struct SessionListFeature {
         // (#78). `IdentifiedArray(uniqueElements:)` preconditions on unique ids and
         // trapped in the field, so dedupe first — keep the FIRST occurrence (server order).
         state.sessions = IdentifiedArray(filtered, uniquingIDsWith: { first, _ in first })
+        reconcileStoppedBaselines(&state)
         let visible = state.sessions
         // Seed last-seen counts for newly-discovered sessions so they don't all show as
         // unread on first sight; only later increases flag unread.
@@ -1601,6 +1635,36 @@ public struct SessionListFeature {
 
   private func persistSeenCounts(_ counts: [String: Int]) -> Effect<Action> {
     .run { [preferences] _ in preferences.saveSeenCounts(counts) }
+  }
+
+  /// Reconcile poll rows against authoritative stop baselines. The list's `is_active`
+  /// means "activity within 300 seconds", so a poll can flip an authoritatively-stopped
+  /// row back on without any new server activity. A baseline holds until fresher row
+  /// activity proves a genuine restart elsewhere (`updatedAt`/`messageCount` advancing),
+  /// or the row disappears from the list.
+  private func reconcileStoppedBaselines(_ state: inout State) {
+    guard !state.stoppedBaselines.isEmpty else { return }
+    for id in state.stoppedBaselines.keys {
+      guard let row = state.sessions[id: id], let baseline = state.stoppedBaselines[id]
+      else {
+        state.stoppedBaselines.removeValue(forKey: id)
+        continue
+      }
+      let advanced: Bool = {
+        if let count = row.messageCount, let base = baseline.messageCount, count > base {
+          return true
+        }
+        if let updated = row.updatedAt, let base = baseline.updatedAt, updated > base {
+          return true
+        }
+        return false
+      }()
+      if advanced {
+        state.stoppedBaselines.removeValue(forKey: id)
+      } else if row.isActive == true {
+        state.sessions[id: id]?.isActive = false
+      }
+    }
   }
 
   private func persistPinnedIDs(_ ids: [String]) -> Effect<Action> {

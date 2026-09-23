@@ -16,6 +16,8 @@ public struct SettingsFeature {
     public var savedConfirmation: Bool
     /// Live debug log, newest last; fed by `DebugLogClient`.
     public var log: [GatewayLogEntry]
+    /// Safe, bounded trace only; never populated from the gateway debug log.
+    public var connectionTrace: [ConnectionTraceEntry]
     /// Whether the connected agent exposes the `hermes-push` plugin (passed down from the
     /// session list's capability probe). When false the notifications UI (C6) shows a
     /// "not available on this server" note instead of the toggle.
@@ -85,6 +87,7 @@ public struct SettingsFeature {
       self.token = connection.token ?? ""
       self.savedConfirmation = false
       self.log = []
+      self.connectionTrace = []
       self.pushAvailable = pushAvailable
       self.notificationsEnabled = notificationsEnabled
       self.notificationsDenied = notificationsDenied
@@ -127,6 +130,7 @@ public struct SettingsFeature {
     case binding(BindingAction<State>)
     case task
     case logUpdated([GatewayLogEntry])
+    case copyConnectionTraceTapped
     case saveTokenTapped
     case clearTokenTapped
     case reconnectTapped
@@ -190,6 +194,8 @@ public struct SettingsFeature {
   @Dependency(\.preferences) var preferences
   @Dependency(\.chatSnapshot) var chatSnapshot
   @Dependency(\.debugLog) var debugLog
+  @Dependency(\.connectionTrace) var connectionTrace
+  @Dependency(\.pasteboard) var pasteboard
   @Dependency(\.hermesREST) var rest
   @Dependency(\.push) var push
   @Dependency(\.bearerTokens) var bearerTokens
@@ -203,6 +209,7 @@ public struct SettingsFeature {
     Reduce { state, action in
       switch action {
       case .task:
+        state.connectionTrace = connectionTrace.snapshot()
         return .merge(
           .run { [debugLog] send in
             for await entries in debugLog.stream() {
@@ -224,6 +231,14 @@ public struct SettingsFeature {
       case let .pushPluginInfoLoaded(info):
         state.pushPlugin = info
         return .none
+
+      case .copyConnectionTraceTapped:
+        // Snapshot at tap time so events added while Settings was open are included.
+        let entries = connectionTrace.snapshot()
+        state.connectionTrace = entries
+        let text = (["Connection & Send trace (on-device, sanitized)"] + entries.map(\.line))
+          .joined(separator: "\n")
+        return .run { [pasteboard] _ in pasteboard.copy(text) }
 
       case .updatePluginTapped:
         guard state.pluginUpdate != .updating else { return .none }
