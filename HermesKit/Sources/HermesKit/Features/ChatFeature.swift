@@ -486,13 +486,23 @@ public struct ChatFeature {
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
     var hasRequestedSession: Bool
-    /// Lossless reconnect: the most recent per-session sequence number received from the
-    /// gateway. Reset to `nil` when the session changes or the epoch changes. Used to issue
-    /// `session.events.since` on reconnect.
-    public var lastSeenSeq: Int?
+    /// Lossless reconnect: per-session watermark tracking the last applied sequence number.
+    /// Reset when the session changes, the epoch changes, or replay is unsupported.
+    public struct ReplayCursor: Equatable, Sendable {
+      public var sessionID: String
+      public var seq: Int
+      public init(sessionID: String, seq: Int) {
+        self.sessionID = sessionID
+        self.seq = seq
+      }
+    }
+    public var replayCursor: ReplayCursor?
     /// Lossless reconnect: the server process's replay epoch (a uuid that changes on gateway
     /// restart, resetting all sequence counters). Captured from `gateway.ready`.
     public var replayEpoch: String?
+    /// Set to `false` when the server returns `-32601` (unknown method) for `session.events.since`,
+    /// suppressing further replay attempts for this slot's lifetime.
+    public var replaySupported: Bool = true
     /// Set by the first `.task` (the initial connect). The view's `.task` fires on EVERY
     /// appearance — including re-appearing over a LIVE slot after a nav pop — and an
     /// unconditional `connect` there would cancel-and-redial a healthy socket (the dial
@@ -559,8 +569,9 @@ public struct ChatFeature {
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
       self.hasRequestedSession = false
-      self.lastSeenSeq = nil
+      self.replayCursor = nil
       self.replayEpoch = nil
+      self.replaySupported = true
       self.hasStarted = false
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
@@ -1120,13 +1131,15 @@ public struct ChatFeature {
           trace(.socketReady, state: state)
           // Capture the server's replay epoch on the first ready after connect.
           if let epoch = frame.replayEpoch {
+            // Epoch change (gateway restart) → clear cursor, adopt new epoch.
+            if let known = state.replayEpoch, known != epoch {
+              state.replayCursor = nil
+            }
             state.replayEpoch = epoch
           }
         }
-        // Track per-session sequence numbers for replay gap detection.
-        if let seq = frame.seq, frame.sessionID == state.sessionKey {
-          state.lastSeenSeq = seq
-        }
+        // Advance the replay cursor for this session's sequenced frames.
+        advanceCursor(frame, into: &state)
         // Snapshot whether the user is parked at the bottom window *before* the fold appends any
         // streaming rows, so we can re-pin afterward without yanking a user who scrolled up.
         let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
@@ -2772,6 +2785,30 @@ public struct ChatFeature {
       await send(.gatewayClosed)
     }
     .cancellable(id: CancelID.socket, cancelInFlight: true)
+  }
+
+  // MARK: - Lossless reconnect — cursor tracking
+
+  /// Advance the replay cursor from a live or replayed frame. Only updates when the frame
+  /// carries a session ID and a valid seq. A frame for a different session replaces the
+  /// cursor entirely (the slot follows one session). A seq ≤ the current cursor is a no-op
+  /// for the cursor (but the event still reduces — out-of-order events are the server's
+  /// problem; the cursor tracks *our* watermark for replay requests).
+  private func advanceCursor(_ frame: GatewayFrame, into state: inout State) {
+    guard let sessionID = frame.sessionID, let seq = frame.seq else { return }
+    if let cursor = state.replayCursor {
+      if cursor.sessionID == sessionID {
+        if seq > cursor.seq {
+          state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+        }
+        // seq ≤ cursor → leave the cursor (de-dup / reorder from replay)
+      } else {
+        // Different session → replace (slot changed sessions).
+        state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+      }
+    } else {
+      state.replayCursor = State.ReplayCursor(sessionID: sessionID, seq: seq)
+    }
   }
 
   /// Create a brand-new session (`session.create`). New sessions send no title so the
