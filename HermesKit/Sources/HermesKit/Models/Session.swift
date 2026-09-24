@@ -239,6 +239,16 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
   /// `tool_name` from the DB/REST shape.
   public var toolDisplayName: String? { name?.nonEmpty ?? toolName?.nonEmpty }
 
+  /// Display-only timeline kind from the gateway (`session.resume` history): `async_delegation_complete`
+  /// (a background delegation result the gateway injected as a role=user bookkeeping row),
+  /// `skill_invocation` (a user turn's slash-command scaffold), `steer`, model switches, etc.
+  /// Absent on ordinary user/assistant/tool rows. Desktop renders these as status cards; the
+  /// mobile app must NOT paint them as user bubbles.
+  public var displayKind: String?
+  /// Display-only metadata accompanying `displayKind` (e.g. `delegation_id`, `task_count`,
+  /// `completed_count`, `failed_count` for delegation deliveries).
+  public var displayMetadata: JSONValue?
+
   enum CodingKeys: String, CodingKey {
     case id, role, content, text, name, context, timestamp, reasoning
     case toolName = "tool_name"
@@ -246,6 +256,8 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     case toolCalls = "tool_calls"
     case reasoningContent = "reasoning_content"
     case reasoningDetails = "reasoning_details"
+    case displayKind = "display_kind"
+    case displayMetadata = "display_metadata"
   }
 
   public init(
@@ -253,7 +265,8 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     text: String? = nil, name: String? = nil, context: String? = nil,
     timestamp: Double? = nil,
     toolName: String? = nil, toolCallID: String? = nil, toolCalls: [ToolCallRef]? = nil,
-    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil
+    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil,
+    displayKind: String? = nil, displayMetadata: JSONValue? = nil
   ) {
     self.id = id
     self.role = role
@@ -268,6 +281,8 @@ public struct SessionMessage: Equatable, Sendable, Decodable, Identifiable {
     self.reasoning = reasoning
     self.reasoningContent = reasoningContent
     self.reasoningDetails = reasoningDetails
+    self.displayKind = displayKind
+    self.displayMetadata = displayMetadata
   }
 
   public init(from decoder: Decoder) throws {

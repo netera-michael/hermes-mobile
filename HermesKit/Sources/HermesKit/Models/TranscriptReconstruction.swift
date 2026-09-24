@@ -18,6 +18,29 @@ import Foundation
 ///   3. a completed **tool** row for each `role: "tool"` entry (title = `name`, the
 ///      `context` preview surfaced in the detail sheet).
 ///
+private extension SessionMessage {
+  /// One-line status text for an `async_delegation_complete` delivery: prefer the gateway's
+  /// summary counts (`completed_count` / `failed_count` / `task_count` in `display_metadata`),
+  /// falling back to the header line of the delivery text itself.
+  static func delegationStatusText(_ message: SessionMessage) -> String {
+    func count(_ key: String) -> Int? {
+      guard case let .object(dict)? = message.displayMetadata,
+            case let .number(n)? = dict[key] else { return nil }
+      return Int(n)
+    }
+    if let tasks = count("task_count") {
+      let completed = count("completed_count") ?? tasks
+      let failed = count("failed_count") ?? 0
+      if failed > 0 {
+        return "Background delegation finished — \(completed)/\(tasks) succeeded, \(failed) failed."
+      }
+      return "Background delegation finished — \(completed)/\(tasks) task\(tasks == 1 ? "" : "s") succeeded."
+    }
+    let body = message.displayText ?? ""
+    return body.split(separator: "\n").first.map(String.init) ?? "Background delegation finished."
+  }
+}
+
 /// Identity is **deterministic and content-derived**: each row's `id` is a stable UUID
 /// hashed from its `(sequenceIndex, role, kindDiscriminator)` — NOT a fresh random UUID per
 /// call. So the same history in always yields byte-identical ids out (lets a diffing engine
@@ -67,6 +90,17 @@ public func reconstructTranscript(_ messages: [SessionMessage]) -> [ChatRow] {
       }
 
     case "user":
+      // Gateway display-only timeline rows (delegation deliveries, skill invocations, model
+      // switches) are stored as role=user bookkeeping — desktop renders them as status cards.
+      // Painting them as user bubbles misattributed the gateway's own notices to Michael.
+      // Delegation deliveries render as a collapsed status row with the summary counts;
+      // other display-kind rows are hidden entirely (their content is agent-facing).
+      if let kind = message.displayKind, !kind.isEmpty {
+        if kind == "async_delegation_complete" {
+          append(.status(kind: "delegation", text: SessionMessage.delegationStatusText(message)))
+        }
+        continue
+      }
       if let text = message.displayText {
         append(.message(role: .user, text: text, isComplete: true))
       }

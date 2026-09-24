@@ -16,12 +16,14 @@ struct TranscriptReconstructionTests {
   private func msg(
     _ id: Int, _ role: String, text: String? = nil,
     name: String? = nil, context: String? = nil,
-    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil
+    reasoning: String? = nil, reasoningContent: String? = nil, reasoningDetails: String? = nil,
+    displayKind: String? = nil, displayMetadata: JSONValue? = nil
   ) -> SessionMessage {
     SessionMessage(
       id: id, role: role,
       text: text, name: name, context: context,
-      reasoning: reasoning, reasoningContent: reasoningContent, reasoningDetails: reasoningDetails
+      reasoning: reasoning, reasoningContent: reasoningContent, reasoningDetails: reasoningDetails,
+      displayKind: displayKind, displayMetadata: displayMetadata
     )
   }
 
@@ -358,5 +360,82 @@ struct TranscriptReconstructionTests {
       #expect(row.kind.discriminator == row.kindDiscriminator)
       #expect(row.kind.role == row.rowRole)
     }
+  }
+
+  // MARK: - Gateway timeline rows (display_kind)
+
+  /// A delegation delivery (`display_kind: async_delegation_complete`) must NOT paint as a
+  /// user bubble — it becomes a collapsed status row with the summary counts (#misattributed
+  /// gateway notices rendering as the user's own messages).
+  @Test func delegationDeliveryRendersAsStatusRowNotUserBubble() {
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "real prompt"),
+      msg(2, "user",
+          text: "[ASYNC DELEGATION BATCH COMPLETE — deleg_e511dacd]\nA background fan-out unit you dispatched earlier — 2 subagent(s) — has finished; ...",
+          displayKind: "async_delegation_complete",
+          displayMetadata: .object([
+            "delegation_id": .string("deleg_e511dacd"),
+            "task_count": .number(2), "completed_count": .number(2), "failed_count": .number(0),
+          ])),
+      msg(3, "assistant", text: "reply"),
+    ])
+
+    #expect(rows.count == 3)
+    #expect(rows[0].kind == .message(role: .user, text: "real prompt", isComplete: true))
+    guard case let .status(kind, text) = rows[1].kind else {
+      Issue.record("expected a status row for the delegation delivery, got \(rows[1].kind)")
+      return
+    }
+    #expect(kind == "delegation")
+    #expect(text == "Background delegation finished — 2/2 tasks succeeded.")
+    #expect(rows[2].kind == .message(role: .assistant, text: "reply", isComplete: true))
+  }
+
+  @Test func delegationDeliveryFailureCounts() {
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "[ASYNC DELEGATION BATCH COMPLETE — d1]\n...",
+          displayKind: "async_delegation_complete",
+          displayMetadata: .object([
+            "delegation_id": .string("d1"),
+            "task_count": .number(3), "completed_count": .number(2), "failed_count": .number(1),
+          ])),
+    ])
+    guard case let .status(_, text)? = rows.first?.kind else {
+      Issue.record("expected a status row, got \(rows.first?.kind)")
+      return
+    }
+    #expect(text == "Background delegation finished — 2/3 succeeded, 1 failed.")
+  }
+
+  @Test func delegationDeliveryWithoutMetadataFallsBackToHeaderLine() {
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "[ASYNC DELEGATION BATCH COMPLETE — d2]\nmore text...",
+          displayKind: "async_delegation_complete"),
+    ])
+    guard case let .status(_, text)? = rows.first?.kind else {
+      Issue.record("expected a status row, got \(rows.first?.kind)")
+      return
+    }
+    #expect(text == "[ASYNC DELEGATION BATCH COMPLETE — d2]")
+  }
+
+  /// Other display-kind rows (skill invocation scaffolds, model switches, steer markers) are
+  /// agent-facing bookkeeping — hidden entirely, never rendered as a user bubble.
+  @Test func otherDisplayKindsAreHidden() {
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "/model gpt-x", displayKind: "skill_invocation"),
+      msg(2, "user", text: "steer text", displayKind: "steer"),
+      msg(3, "user", text: "still visible"),
+    ])
+    #expect(rows.count == 1)
+    #expect(rows.first?.kind == .message(role: .user, text: "still visible", isComplete: true))
+  }
+
+  /// Ordinary user rows are untouched when the server omits display_kind (older gateways).
+  @Test func plainUserRowsUnaffected() {
+    let rows = reconstructTranscript([
+      msg(1, "user", text: "hello"),
+    ])
+    #expect(rows.first?.kind == .message(role: .user, text: "hello", isComplete: true))
   }
 }
