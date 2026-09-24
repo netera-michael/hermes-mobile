@@ -318,17 +318,17 @@ socket).
 - Modify: `HermesKit/Sources/HermesKit/Models/JSONRPC.swift`
 - Modify: `HermesKit/Tests/HermesKitTests/JSONRPCTests.swift`
 
-- [ ] add `GatewayFrame` with the memberwise init and `init?(eventObject:)` (type required,
+- [x] add `GatewayFrame` with the memberwise init and `init?(eventObject:)` (type required,
       `session_id` / `seq` / `payload` optional; `seq` only when a non-negative integer)
-- [ ] add `ReplayBatch` (lenient: `events` elements that fail `GatewayFrame(eventObject:)`
+- [x] add `ReplayBatch` (lenient: `events` elements that fail `GatewayFrame(eventObject:)`
       are dropped; `truncated` defaults `false`)
-- [ ] change `InboundFrame.event` to carry a `GatewayFrame`; parse `replay_epoch` from the
+- [x] change `InboundFrame.event` to carry a `GatewayFrame`; parse `replay_epoch` from the
       `gateway.ready` payload onto the frame; `session_id` and `seq` from `params`
-- [ ] write decoding tests: live frame with `seq`; frame without `seq` (older agent) → nil;
+- [x] write decoding tests: live frame with `seq`; frame without `seq` (older agent) → nil;
       non-integer `seq` → nil; `gateway.ready` with/without `replay_epoch`; session-less
       global event; `events.since` reply with two events + one malformed element dropped;
       `truncated` absent → false
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 2: Gateway client yields frames
 
@@ -338,15 +338,15 @@ socket).
 - Modify: `HermesKit/Tests/HermesKitTests/HermesGatewayClientTests.swift`
 - Modify: every test stub yielding `.ready` / other events on `hermesGateway.connect` (grep `yield(.` in `HermesKit/Tests`)
 
-- [ ] `connect` returns `AsyncStream<GatewayFrame>`; `GatewayConnection.handle` yields the
+- [x] `connect` returns `AsyncStream<GatewayFrame>`; `GatewayConnection.handle` yields the
       frame; the cookie-mode `.authExpired` path yields `GatewayFrame(.authExpired)`
-- [ ] update `ChatFeature.connect(_:)` to iterate frames and send `.gatewayEvent(frame.event)`
+- [x] update `ChatFeature.connect(_:)` to iterate frames and send `.gatewayEvent(frame.event)`
       (temporary — Task 3 switches it to `.gatewayFrame`), `debugLog.append(frame.event)`
-- [ ] update the test stubs to yield `GatewayFrame(.ready)` etc.; `DemoMode.swift` compiles
+- [x] update the test stubs to yield `GatewayFrame(.ready)` etc.; `DemoMode.swift` compiles
       unchanged (verify with an app build)
-- [ ] write client tests: a stamped event reaches the stream with `sessionID` + `seq`; the
+- [x] write client tests: a stamped event reaches the stream with `sessionID` + `seq`; the
       ready frame carries the epoch; multiple newline-delimited frames keep their seqs
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 3: Reducer cursor and epoch tracking (`.gatewayFrame`)
 
@@ -355,19 +355,19 @@ socket).
 - Create: `HermesKit/Tests/HermesKitTests/ReplayCursorTests.swift`
 - Modify: the 5 `receive(\.gatewayEvent)` asserts that follow a stubbed connect (→ `\.gatewayFrame`)
 
-- [ ] add `ReplayCursor`, `replayCursor`, `replayEpoch`, `replaySupported` to `State` (init
+- [x] add `ReplayCursor`, `replayCursor`, `replayEpoch`, `replaySupported` to `State` (init
       defaults; `Equatable` as the rest)
-- [ ] add `Action.gatewayFrame(GatewayFrame)`; extract the `.gatewayEvent` body into
+- [x] add `Action.gatewayFrame(GatewayFrame)`; extract the `.gatewayEvent` body into
       `reduceGatewayEvent(_:into:)`; `.gatewayEvent` and `.gatewayFrame` both call it;
       `.gatewayFrame` first applies the epoch rule and `advanceCursor`
-- [ ] switch `connect(_:)` to send `.gatewayFrame(frame)`
-- [ ] write tests: seq 1,2,3 advances the cursor; seq 2 after 3 is ignored (event still
+- [x] switch `connect(_:)` to send `.gatewayFrame(frame)`
+- [x] write tests: seq 1,2,3 advances the cursor; seq 2 after 3 is ignored (event still
       reduces); seq-less frame leaves the cursor; a frame for another session id replaces
       the cursor; `.ready` with epoch "e1" adopts it; a later `.ready` with "e2" clears the
       cursor and adopts "e2"; `.ready` without an epoch keeps both; `.gatewayFrame` reduces
       identically to `.gatewayEvent` for a `message.delta` (transcript + persist effect)
-- [ ] update the affected `HydrateTests` / `AppFeatureTests` asserts to `\.gatewayFrame`
-- [ ] run tests - must pass before next task
+- [x] update the affected `HydrateTests` / `AppFeatureTests` asserts to `\.gatewayFrame`
+- [x] run tests - must pass before next task
 
 ### Task 4: Replay-then-hydrate on `.ready`
 
@@ -376,18 +376,18 @@ socket).
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 - Create: `HermesKit/Tests/HermesKitTests/ReplayTests.swift`
 
-- [ ] add `CancelID.replay`, `Action.replayResult(Result<ReplayBatch, GatewayError>)`, the
+- [x] add `CancelID.replay`, `Action.replayResult(Result<ReplayBatch, GatewayError>)`, the
       `replay(cursor:)` effect (`session.events.since {session_id, last_seen}`; malformed
       result → `.failure(.server("Malformed session.events.since result"))`)
-- [ ] insert the replay branch in `reduce(event: .ready)` (stored-session path only, cursor
+- [x] insert the replay branch in `reduce(event: .ready)` (stored-session path only, cursor
       must match `liveSessionID`, `replaySupported`)
-- [ ] implement `replayResult`: epoch mismatch → drop cursor, adopt; `truncated` → skip;
+- [x] implement `replayResult`: epoch mismatch → drop cursor, adopt; `truncated` → skip;
       otherwise fold gated events in order via `reduceGatewayEvent` + `advanceCursor`,
       merging the fold's effects; `-32601` → `replaySupported = false`; any failure → log
       via `debugLog` with the call-site carve-out comment; always finish with `hydrate`;
       guard on `status != .reconnecting`
-- [ ] cancel `CancelID.replay` on `.teardown`, `.teardownSocketOnly`, and `.gatewayClosed`
-- [ ] write reduction tests (`TestStore`, `TestClock`, in-memory snapshot):
+- [x] cancel `CancelID.replay` on `.teardown`, `.teardownSocketOnly`, and `.gatewayClosed`
+- [x] write reduction tests (`TestStore`, `TestClock`, in-memory snapshot):
       - reconnect with cursor (live1, 41) sends `session.events.since {session_id: live1,
         last_seen: 41}` BEFORE `session.resume` (record the RPC order)
       - reply with tool.start 42 / tool.complete 43 folds two tool rows, cursor → 43, then
@@ -407,7 +407,7 @@ socket).
         with `running: true` leaves it standing
       - replayed `message.complete` with `running: false` hydrate → wholesale replace, no
         preserved rows
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 5: Cursor lifetime across background grace and re-hydrates
 
@@ -415,15 +415,15 @@ socket).
 - Modify: `HermesKit/Sources/HermesKit/Features/ChatFeature.swift` (only if a path resets the cursor unintentionally)
 - Modify: `HermesKit/Tests/HermesKitTests/HydrateTests.swift`
 
-- [ ] audit every state reset in `ChatFeature` (`.teardownSocketOnly`, `.foreground`,
+- [x] audit every state reset in `ChatFeature` (`.teardownSocketOnly`, `.foreground`,
       `.reattached`, `.resumeAfterReauth`, branch create, `applyActivate`) — the cursor
       must survive all but `.teardown`; `applyActivate` returning a different live
       `session_id` leaves the cursor to be replaced by the next stamped frame
-- [ ] write tests: grace-expiry `.teardownSocketOnly` → `.foreground` redial replays from
+- [x] write tests: grace-expiry `.teardownSocketOnly` → `.foreground` redial replays from
       the pre-expiry cursor; `.resumeAfterReauth` replays (same session, fresh cookies);
       `.foreground` over a healthy socket does NOT call `events.since` (no drop happened —
       `hasRequestedSession` is still true, the `.ready` branch never runs)
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 - [ ] verify all requirements from Overview: gap tool/thinking/status/prompt events appear
@@ -463,3 +463,25 @@ socket).
 - #97's exact-state hydration and this replay overlap on gap `approval.request`s; once both
   land, the `approval.pending` probe in #97 is still needed for agents between v2026.8.16
   and v2026.8.27 (request ids but no ring).
+
+
+## Implementation Notes (2026-09-24, Tasks 1–5 landed on fork `personal/michael`)
+
+Deviations from the plan as written:
+
+- **No `Action.gatewayFrame` action.** The plan proposed renaming `.gatewayEvent` to
+  `.gatewayFrame(GatewayFrame)` with a shared `reduceGatewayEvent`. Instead, `.gatewayEvent`
+  now carries the full `GatewayFrame` (seq/sessionID/replayEpoch) and the epoch/cursor
+  handling lives in its reduction directly. Same behavior, fewer actions, all 145 existing
+  reduction tests kept their `.gatewayEvent` spelling via a test-only overload.
+- **Replay branch guards** added beyond the plan: `attachLiveSessionID == nil` and
+  `!hasReplayedBranchSeed` so live-attach re-hydration and branch-seed replay keep their
+  dedicated paths.
+- **`replayResult` guards on `status != .reconnecting`** (per plan) and re-reads
+  `storedSessionID`/`scopedProfile` at reduction time (plan's option B).
+- **Task 5 needed no reducer changes**: the replay fold registers rows in `toolRowIDs`
+  exactly like live events, so `applyActivate`'s #26 running-turn preservation covers
+  replayed rows for free (proven by `ReplayHydrateInterplayTests`).
+- Commits: `c1a0376` (Tasks 1–2), `3a2d60d` (Task 3), `9dabcf9` (Task 4), `b853e7b` (Task 5).
+  Test suites: `GatewayEventDecodingTests`, `ReplayCursorTests` (9), `ReplayTests` (9),
+  `ReplayHydrateInterplayTests` (2). Full suite 1538 tests, only pre-existing issues.
