@@ -758,6 +758,10 @@ public struct ChatFeature {
     case gatewayEvent(GatewayFrame)
     case gatewayClosed
     case reconnectTick
+    /// Lossless reconnect: the `session.events.since` result for the cursor captured at
+    /// `.ready`. Success folds the missed events (seq-gated) before the trailing hydrate;
+    /// failure (incl. `-32601` → `replaySupported = false`) folds nothing and still hydrates.
+    case replayResult(Result<ReplayBatch, GatewayError>)
     /// Re-auth succeeded for the *same* user (`AppFeature`): swap in the fresh `AuthSession`
     /// and reconnect the (previously paused) socket so the chat resumes in place.
     case resumeAfterReauth(ServerConnection)
@@ -1005,7 +1009,7 @@ public struct ChatFeature {
 
   private enum CancelID: Hashable {
     case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
-         thinkingTimer, persist
+         thinkingTimer, persist, replay
     /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
     /// one: a cancelled effect never emits `.configSetFailed`, so a stale rejection can't
     /// roll the newer value back. The two keys never cancel each other.
@@ -1090,6 +1094,7 @@ public struct ChatFeature {
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.replay),
           .cancel(id: CancelID.thinkingTimer),
           .cancel(id: CancelID.persist)
         )
@@ -1112,7 +1117,8 @@ public struct ChatFeature {
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
-          .cancel(id: CancelID.hydrate)
+          .cancel(id: CancelID.hydrate),
+          .cancel(id: CancelID.replay)
         )
 
       case .loadOlderRequested:
@@ -1154,6 +1160,60 @@ public struct ChatFeature {
         else { return effect }
         return .merge(effect, debouncedPersist())
 
+      case let .replayResult(result):
+        // The hydrate always follows — it is the server-authoritative reconciliation even
+        // when the replay folded cleanly. Skip it only when the socket died during the RTT
+        // (`.reconnecting`): a hydrate over a dead socket would throw `.disconnected` and
+        // trigger handleActivateFailure noise; the next `.ready` re-runs replay + hydrate.
+        guard state.status != .reconnecting, let stored = state.storedSessionID else {
+          return .none
+        }
+        let storedProfile = state.scopedProfile
+        var foldEffects: [Effect<Action>] = []
+        switch result {
+        case let .success(batch):
+          // Gateway restarted between the cursor and now (epoch differs) → every recorded
+          // seq is void; drop the cursor and let the hydrate rebuild from scratch.
+          if let epoch = batch.epoch, let known = state.replayEpoch, epoch != known {
+            state.replayCursor = nil
+            state.replayEpoch = epoch
+          } else if batch.truncated {
+            // The gap fell off the server's ring — history refetch (the hydrate) is the
+            // only honest source. Fold nothing.
+          } else {
+            // Seq gate: skip frames already folded live (or out of order); advance the
+            // cursor per folded frame so a later replay never re-sends them.
+            for frame in batch.events {
+              guard let seq = frame.seq,
+                    let cursor = state.replayCursor,
+                    cursor.sessionID == frame.sessionID,
+                    seq > cursor.seq
+              else { continue }
+              advanceCursor(frame, into: &state)
+              let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
+              let effect = reduce(event: frame.event, into: &state)
+              maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
+              if persistRelevant(frame.event), state.storedSessionID != nil || state.liveSessionID != nil {
+                foldEffects.append(.merge(effect, debouncedPersist()))
+              } else {
+                foldEffects.append(effect)
+              }
+            }
+          }
+        case let .failure(error):
+          // An older agent doesn't know `session.events.since` (`-32601`): latch replay
+          // off for this slot's lifetime; every later reconnect hydrates directly.
+          if error.isUnknownMethod { state.replaySupported = false }
+          // Every other replay failure is swallowed by design — replay is an optimization
+          // over the lossy reconnect, and the trailing hydrate still rebuilds everything.
+          // Carve-out: the fold path bypasses the socket-effect debugLog append, so note
+          // the failure via the same ring for Settings debugging.
+          debugLog.append(.error(message: "replay failed: \(error.message)"))
+        }
+        // Replay first, hydrate second (ordering is the whole point: the replayed rows
+        // survive because the running hydrate preserves live thinking/tool rows, #26).
+        return .merge(foldEffects + [hydrate(sessionID: stored, profile: storedProfile)])
+
       case .gatewayClosed:
         trace(.socketClosed, state: state)
         state.hasRequestedSession = false
@@ -1169,6 +1229,7 @@ public struct ChatFeature {
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
+          .cancel(id: CancelID.replay),
           .run { [clock] send in
             try await clock.sleep(for: delay)
             await send(.reconnectTick)
@@ -2376,6 +2437,20 @@ public struct ChatFeature {
       // re-hydrate server-authoritatively via the unified `hydrate` path.
       if let stored = state.storedSessionID {
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
+        // Lossless reconnect: when the slot has a live cursor for the current session and
+        // the server supports replay, fetch the missed events FIRST and fold them through
+        // the same pipeline as live events, then run the normal hydrate. The hydrate stays
+        // — it remains the server-authoritative reconciliation (row provenance, model,
+        // usage, inflight snapshot); the replay merely rebuilds the live streaming rows
+        // (thinking/tool) the hydrate would otherwise drop (plan §Task 4).
+        if state.replaySupported,
+           let cursor = state.replayCursor,
+           cursor.sessionID == state.liveSessionID,
+           state.attachLiveSessionID == nil, // live-attach re-hydration keeps its own path
+           !state.hasReplayedBranchSeed {
+          trace(.hydrateStarted, state: state)
+          return replay(cursor: cursor, thenHydrate: (stored, state.scopedProfile))
+        }
         trace(.hydrateStarted, state: state)
         return hydrate(sessionID: stored, profile: state.scopedProfile)
       }
@@ -2885,6 +2960,35 @@ public struct ChatFeature {
   /// answers "session not found" for any stored session opened from the list (the common
   /// case). The decoded `ActivateResponse` is applied wholesale in `applyActivate` — server
   /// wins.
+  /// Lossless reconnect: fetch the events the phone missed while the socket was down via
+  /// `session.events.since {session_id, last_seen}` and deliver them as `.replayResult`.
+  /// Malformed JSON → `.failure(.server(...))`. The 30 s default per-request budget applies
+  /// (desktop uses 10 s); a slow replay only delays the hydrate — it never redials.
+  private func replay(cursor: State.ReplayCursor, thenHydrate: (String, String?)) -> Effect<Action> {
+    .run { [gateway] send in
+      let params: JSONValue = .object([
+        "session_id": .string(cursor.sessionID),
+        "last_seen": .number(Double(cursor.seq)),
+      ])
+      do {
+        let result = try await gateway.send("session.events.since", params)
+        guard let batch = ReplayBatch(result: result) else {
+          await send(.replayResult(.failure(.server("Malformed session.events.since result"))))
+          return
+        }
+        await send(.replayResult(.success(batch)))
+      } catch let error as GatewayError {
+        await send(.replayResult(.failure(error)))
+      } catch {
+        await send(.replayResult(.failure(.disconnected)))
+      }
+    }
+    // One outstanding replay; a deliberate teardown (`.teardown` / `.teardownSocketOnly`)
+    // cancels it so a stale result can't reduce against a socket we chose to drop. A
+    // `.gatewayClosed` during the RTT cancels it too (the next `.ready` re-runs it).
+    .cancellable(id: CancelID.replay, cancelInFlight: true)
+  }
+
   private func hydrate(sessionID: String, profile: String?) -> Effect<Action> {
     .run { [gateway] send in
       var fields: [String: JSONValue] = ["session_id": .string(sessionID)]
