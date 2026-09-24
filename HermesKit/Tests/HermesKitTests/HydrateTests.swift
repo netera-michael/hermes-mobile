@@ -112,12 +112,14 @@ struct HydrateTests {
     await store.send(.gatewayEvent(.ready)) {
       $0.status = .ready
       $0.hasRequestedSession = true
+      $0.isRefreshingHistory = true // cached paint present → the refreshing strip
     }
     await store.receive(\.activateResult.success) {
       $0.liveSessionID = "live123"
       $0.storedSessionID = "stored123"
       $0.status = .ready
       $0.hasHydrated = true
+      $0.isRefreshingHistory = false
       // Model + usage overwritten by the server (not merged with the cache).
       $0.model = "claude-opus-4-8"
       $0.usage = Usage(contextUsed: 42, contextMax: 200_000, contextPercent: 0)
@@ -209,6 +211,7 @@ struct HydrateTests {
       $0.hasRequestedSession = true
     }
     await store.receive(\.activateResult.failure) {
+      $0.isRefreshingHistory = false
       $0.errorBanner = "boom"
       $0.status = .reconnecting
     }
@@ -254,8 +257,10 @@ struct HydrateTests {
     await store.send(.gatewayEvent(.ready)) {
       $0.status = .ready
       $0.hasRequestedSession = true
+      $0.isRefreshingHistory = true // cached paint present → the refreshing strip
     }
     await store.receive(\.activateResult.failure) {
+      $0.isRefreshingHistory = false
       // A dropped socket is conveyed by the reconnecting status alone — no banner is raised
       // for `.disconnected` (it would otherwise linger after reconnect; see the lock/unlock
       // regression). The cached paint stays put. STATUS-ONLY: the teardown that resumed the

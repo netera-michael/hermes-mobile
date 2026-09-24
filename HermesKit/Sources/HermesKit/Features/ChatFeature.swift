@@ -530,6 +530,13 @@ public struct ChatFeature {
     /// per-slot lifetime, unpersisted. Only `showsEmptyHero` reads it: "the transcript is
     /// empty because the server said so" vs "empty because history hasn't arrived yet".
     var hasHydrated: Bool
+    /// True while a fresh `session.resume` is in flight OVER an already-painted transcript
+    /// (instant-paint snapshot or previous hydrate). The view shows a thin "Refreshing…"
+    /// strip so a slow fetch never reads as "the chat is stuck on old messages". Cleared
+    /// when the hydrate lands (success or failure) or the slot tears down. A cold open with
+    /// nothing painted does NOT set this — the initial connection state already communicates
+    /// loading.
+    public var isRefreshingHistory: Bool
 
     public enum Status: Equatable, Sendable {
       case connecting
@@ -583,6 +590,7 @@ public struct ChatFeature {
       self.awaitingReauth = false
       self.hydrateRetriedAfterTimeout = false
       self.hasHydrated = false
+      self.isRefreshingHistory = false
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.expectsPendingApproval = false
@@ -1104,6 +1112,7 @@ public struct ChatFeature {
 
       case .teardown:
         trace(.socketSuspended, state: state)
+        state.isRefreshingHistory = false
         return .merge(
           releaseVoiceResources(&state),
           .cancel(id: CancelID.socket),
@@ -1448,6 +1457,7 @@ public struct ChatFeature {
         }
         state.hasRequestedSession = true
         state.hydrateRetriedAfterTimeout = false // fresh hydrate: the retry budget resets
+        state.isRefreshingHistory = !state.transcript.isEmpty
         trace(.hydrateStarted, state: state)
         return hydrate(sessionID: sessionID, profile: state.scopedProfile)
 
@@ -2483,9 +2493,11 @@ public struct ChatFeature {
            cursor.sessionID == state.liveSessionID,
            state.attachLiveSessionID == nil, // live-attach re-hydration keeps its own path
            !state.hasReplayedBranchSeed {
+          state.isRefreshingHistory = !state.transcript.isEmpty
           trace(.hydrateStarted, state: state)
           return withBannerCancel(replay(cursor: cursor, thenHydrate: (stored, state.scopedProfile)))
         }
+        state.isRefreshingHistory = !state.transcript.isEmpty
         trace(.hydrateStarted, state: state)
         return withBannerCancel(hydrate(sessionID: stored, profile: state.scopedProfile))
       }
@@ -3113,6 +3125,7 @@ public struct ChatFeature {
     state.hydrateRetriedAfterTimeout = false // hydrate landed: the timeout-retry budget resets
     state.hasReplayedBranchSeed = false // and so does the branch seed-replay budget (#34)
     state.hasHydrated = true // the transcript below is now server-authoritative (#80 hero gate)
+    state.isRefreshingHistory = false // fresh data landed — the "Refreshing…" strip goes away
     // A successful hydrate means we're connected — clear any stale connection banner.
     state.errorBanner = nil
 
@@ -3328,6 +3341,9 @@ public struct ChatFeature {
   /// `.disconnected`/`.timedOut` get transport-symptom handling (banner-less reconnect/retry);
   /// anything else surfaces the error banner.
   private func handleActivateFailure(_ error: GatewayError, into state: inout State) -> Effect<Action> {
+    // The refreshing strip must not outlive the attempt — a failed hydrate shows the error
+    // banner path below, not an eternal spinner.
+    state.isRefreshingHistory = false
     // An unpersisted branch (#34) answering "session not found" means the server REAPED
     // the never-prompted live session (detached socket past the ~20s orphan grace —
     // routine on background→foreground). The seed is only gone SERVER-side; the client
@@ -3414,6 +3430,7 @@ public struct ChatFeature {
       }
       if !state.hydrateRetriedAfterTimeout, let sessionID = state.sessionKey {
         state.hydrateRetriedAfterTimeout = true
+        state.isRefreshingHistory = !state.transcript.isEmpty
         return hydrate(sessionID: sessionID, profile: state.scopedProfile)
       }
       state.hydrateRetriedAfterTimeout = false

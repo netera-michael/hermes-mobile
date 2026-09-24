@@ -11,6 +11,7 @@ struct ChatView: View {
   var body: some View {
     VStack(spacing: 0) {
       connectionBanner
+      refreshingIndicator
       // The toast overlays the transcript (not the whole screen) so it floats just above
       // the composer instead of covering it.
       transcript
@@ -355,6 +356,26 @@ struct ChatView: View {
       }
     case .none:
       EmptyView()
+    }
+  }
+
+  /// Thin indeterminate strip shown while a fresh history fetch is in flight over an
+  /// already-painted transcript (instant-paint cache or a previous hydrate). Non-blocking:
+  /// the cached rows stay interactive; the strip only announces that newer data is coming.
+  @ViewBuilder
+  private var refreshingIndicator: some View {
+    if store.isRefreshingHistory {
+      HStack(spacing: 6) {
+        ProgressView()
+          .controlSize(.small)
+        Text("Refreshing…")
+          .font(.caption.weight(.medium))
+          .foregroundStyle(.secondary)
+        Spacer()
+      }
+      .padding(.horizontal)
+      .padding(.vertical, 4)
+      .background(.secondary.opacity(0.08))
     }
   }
 
