@@ -231,10 +231,17 @@ struct ChatWindowingTests {
     await store.send(.loadOlderRequested)
     #expect(store.state.windowStart < ChatFeature.State.bottomWindowStart(count: 80))
 
-    // A second hydrate (e.g. a foreground re-resume) snaps the window back to the bottom even
-    // though the user had scrolled up — server wins on every wholesale replace.
+    // Calm reconnect: a PURE refresh (same messages → identical deterministic row ids) keeps a
+    // scrolled-up reader exactly where they are — a foreground re-resume must not yank them.
     let response = ActivateResponse(sessionID: "live123", messages: messages, running: false)
     await store.send(.activateResult(.success(response)))
+    #expect(store.state.windowStart < ChatFeature.State.bottomWindowStart(count: store.state.transcript.count))
+
+    // A REAL server change (a new message → rebuilt ids churn) resets to the bottom — the
+    // open/hydrate→bottom contract still holds when history actually grew.
+    let grown = messages + [SessionMessage(id: 81, role: "assistant", content: "new")]
+    let grownResponse = ActivateResponse(sessionID: "live123", messages: grown, running: false)
+    await store.send(.activateResult(.success(grownResponse)))
     #expect(store.state.windowStart == ChatFeature.State.bottomWindowStart(count: store.state.transcript.count))
 
     await store.send(.teardown)

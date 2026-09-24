@@ -364,7 +364,13 @@ struct ChatView: View {
     case .connecting:
       banner("Connecting…", systemImage: "wifi", tint: .secondary)
     case .reconnecting:
-      banner("Reconnecting…", systemImage: "wifi.exclamationmark", tint: .orange)
+      // Calm reconnect: the reducer raises `showsReconnectBanner` only after the socket has
+      // been down past the grace (~2s); sub-grace blips show nothing at all.
+      if store.showsReconnectBanner {
+        banner("Reconnecting…", systemImage: "wifi.exclamationmark", tint: .orange)
+      } else {
+        EmptyView()
+      }
     case .ready:
       EmptyView()
     }

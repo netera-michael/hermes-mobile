@@ -84,8 +84,12 @@ final class ChatSnapshotTests: SnapshotTestCase {
         isComplete: true
       )),
     ]
-    // .reconnecting exercises the connection banner too.
-    assertChatView(rows: rows, title: "Protocol chat", status: .reconnecting)
+    // .reconnecting exercises the connection banner too. The calm-reconnect gate defaults
+    // OFF (a blip shows nothing), so the banner snapshot opts in explicitly — zero
+    // baselines changed.
+    assertChatView(rows: rows, title: "Protocol chat", status: .reconnecting) { state in
+      state.showsReconnectBanner = true
+    }
   }
 
   func testChatView_sentImageAttachment() {

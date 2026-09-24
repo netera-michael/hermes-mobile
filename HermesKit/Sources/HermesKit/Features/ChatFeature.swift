@@ -485,6 +485,12 @@ public struct ChatFeature {
     var thinkingRowID: ChatRow.ID?
     var toolRowIDs: [String: ChatRow.ID]
     var reconnectAttempt: Int
+    /// Calm reconnect: the "Reconnecting…" banner is gated on this flag, which the reducer
+    /// raises only after the socket has been down for a grace period (~2s). A one-second
+    /// blip (lock/unlock, app-switcher peek, brief network wobble) reconnects before the
+    /// grace expires and never shows a banner at all. Data state (`status`) still flips to
+    /// `.reconnecting` immediately — only the *visible* banner is delayed.
+    public var showsReconnectBanner: Bool
     var hasRequestedSession: Bool
     /// Lossless reconnect: per-session watermark tracking the last applied sequence number.
     /// Reset when the session changes, the epoch changes, or replay is unsupported.
@@ -568,6 +574,7 @@ public struct ChatFeature {
       self.thinkingRowID = nil
       self.toolRowIDs = [:]
       self.reconnectAttempt = 0
+      self.showsReconnectBanner = false
       self.hasRequestedSession = false
       self.replayCursor = nil
       self.replayEpoch = nil
@@ -758,6 +765,9 @@ public struct ChatFeature {
     case gatewayEvent(GatewayFrame)
     case gatewayClosed
     case reconnectTick
+    /// Calm reconnect: the banner grace expired while still `.reconnecting` — raise the
+    /// visible banner. A blip that reconnects inside the grace never fires this.
+    case reconnectBannerEligible
     /// Lossless reconnect: the `session.events.since` result for the cursor captured at
     /// `.ready`. Success folds the missed events (seq-gated) before the trailing hydrate;
     /// failure (incl. `-32601` → `replaySupported = false`) folds nothing and still hydrates.
@@ -1007,9 +1017,14 @@ public struct ChatFeature {
     }
   }
 
+  /// Calm reconnect: how long a dropped socket stays banner-silent before the orange
+  /// "Reconnecting…" banner appears. Sub-grace blips (lock/unlock, app-switcher peek,
+  /// Wi-Fi wobble) reconnect with no visible churn at all.
+  static let reconnectBannerGrace: Duration = .seconds(2)
+
   private enum CancelID: Hashable {
     case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
-         thinkingTimer, persist, replay
+         thinkingTimer, persist, replay, reconnectBanner
     /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
     /// one: a cancelled effect never emits `.configSetFailed`, so a stale rejection can't
     /// roll the newer value back. The two keys never cancel each other.
@@ -1096,7 +1111,8 @@ public struct ChatFeature {
           .cancel(id: CancelID.hydrate),
           .cancel(id: CancelID.replay),
           .cancel(id: CancelID.thinkingTimer),
-          .cancel(id: CancelID.persist)
+          .cancel(id: CancelID.persist),
+          .cancel(id: CancelID.reconnectBanner)
         )
 
       case .teardownSocketOnly:
@@ -1114,11 +1130,13 @@ public struct ChatFeature {
         state.status = .reconnecting
         trace(.socketSuspended, state: state)
         state.hasRequestedSession = false
+        state.showsReconnectBanner = false
         return .merge(
           .cancel(id: CancelID.socket),
           .cancel(id: CancelID.reconnect),
           .cancel(id: CancelID.hydrate),
-          .cancel(id: CancelID.replay)
+          .cancel(id: CancelID.replay),
+          .cancel(id: CancelID.reconnectBanner)
         )
 
       case .loadOlderRequested:
@@ -1225,11 +1243,19 @@ public struct ChatFeature {
         guard !state.awaitingReauth else { return .cancel(id: CancelID.thinkingTimer) }
         state.status = .reconnecting
         state.reconnectAttempt += 1
+        // Calm reconnect: do NOT raise the banner yet — a sub-grace blip reconnects
+        // silently. `.reconnectBannerEligible` raises it only if we're still down later.
+        state.showsReconnectBanner = false
         trace(.reconnectScheduled, state: state)
         let delay = backoffDelay(attempt: state.reconnectAttempt)
         return .merge(
           .cancel(id: CancelID.thinkingTimer),
           .cancel(id: CancelID.replay),
+          .run { [clock] send in
+            try await clock.sleep(for: Self.reconnectBannerGrace)
+            await send(.reconnectBannerEligible)
+          }
+          .cancellable(id: CancelID.reconnectBanner, cancelInFlight: true),
           .run { [clock] send in
             try await clock.sleep(for: delay)
             await send(.reconnectTick)
@@ -1240,6 +1266,13 @@ public struct ChatFeature {
       case .reconnectTick:
         trace(.socketDial, state: state)
         return connect(state.connection)
+
+      case .reconnectBannerEligible:
+        // Banner grace expired while the socket is still down — NOW the user sees the
+        // orange "Reconnecting…" banner. Fires only when the blip outlived the grace.
+        guard state.status == .reconnecting else { return .none }
+        state.showsReconnectBanner = true
+        return .none
 
       case let .resumeAfterReauth(connection):
         // The re-auth modal minted a fresh session for the same user. Swap in the new auth
@@ -2425,13 +2458,15 @@ public struct ChatFeature {
       // The socket is (re)connected — clear any stale connection banner (e.g. a "Connection
       // lost." left over from a lock/unlock drop) so it doesn't linger after we reconnect.
       state.errorBanner = nil
-      guard !state.hasRequestedSession else { return .none }
+      // Calm reconnect: down again → banner cleared; a pending banner grace is cancelled.
+      state.showsReconnectBanner = false
+      guard !state.hasRequestedSession else { return withBannerCancel(.none) }
       state.hasRequestedSession = true
       // An unpersisted branch (#34) attaches to its already-live session by LIVE id —
       // it has no DB row until its first prompt, so `session.resume` would 4007.
       if let live = state.attachLiveSessionID {
         state.hydrateRetriedAfterTimeout = false
-        return attachLive(sessionID: live)
+        return withBannerCancel(attachLive(sessionID: live))
       }
       // No stored id → a fresh session: `session.create` (handle only). A stored id →
       // re-hydrate server-authoritatively via the unified `hydrate` path.
@@ -2449,10 +2484,10 @@ public struct ChatFeature {
            state.attachLiveSessionID == nil, // live-attach re-hydration keeps its own path
            !state.hasReplayedBranchSeed {
           trace(.hydrateStarted, state: state)
-          return replay(cursor: cursor, thenHydrate: (stored, state.scopedProfile))
+          return withBannerCancel(replay(cursor: cursor, thenHydrate: (stored, state.scopedProfile)))
         }
         trace(.hydrateStarted, state: state)
-        return hydrate(sessionID: stored, profile: state.scopedProfile)
+        return withBannerCancel(hydrate(sessionID: stored, profile: state.scopedProfile))
       }
       // A standing branch seed with no stored id (an interrupted replay on a branch
       // whose create returned no session_key) recovers the branch here — never a
@@ -2461,12 +2496,12 @@ public struct ChatFeature {
       if let seed = state.branchSeed {
         if !state.hasReplayedBranchSeed {
           state.hasReplayedBranchSeed = true
-          return replayBranchSeed(seed, profile: state.scopedProfile)
+          return withBannerCancel(replayBranchSeed(seed, profile: state.scopedProfile))
         }
         state.errorBanner = "Couldn’t restore the branch — starting a fresh chat."
         state.branchSeed = nil
       }
-      return createSession(profile: state.scopedProfile)
+      return withBannerCancel(createSession(profile: state.scopedProfile))
 
     case .messageStart:
       // Defer creating the assistant row until the first delta — a tool-only turn emits
@@ -2849,6 +2884,14 @@ public struct ChatFeature {
 
   // MARK: - Effects
 
+  /// Calm reconnect: wrap a `.ready`-case effect so the pending banner grace is cancelled
+  /// alongside whatever the ready path launches. A stale banner timer is otherwise left in
+  /// flight (it self-neutralizes via the status guard, but tests and effect hygiene prefer
+  /// an explicit cancel).
+  private func withBannerCancel(_ effect: Effect<Action>) -> Effect<Action> {
+    .merge(effect, .cancel(id: CancelID.reconnectBanner))
+  }
+
   private func connect(_ connection: ServerConnection) -> Effect<Action> {
     .run { [gateway, debugLog] send in
       // Pass the full auth regime: `.token` → `?token=` (byte-identical); `.cookie` mints a
@@ -3138,6 +3181,12 @@ public struct ChatFeature {
       }
     }
 
+    // Calm reconnect: capture the pre-replace state. A pure refresh (nothing changed
+    // server-side → the rebuild + re-appends reproduce the SAME id sequence) must not yank a
+    // scrolled-up reader: the window below is then kept instead of reset to the bottom.
+    let wasScrolledUp = state.windowStart < State.bottomWindowStart(count: state.transcript.count)
+    let idsBeforeReplace = state.transcript.map(\.id)
+
     // Rebuild the transcript wholesale from the authoritative history (server wins).
     state.transcript = IdentifiedArrayOf(uniqueElements: reconstructTranscript(response.messages))
     state.streamingRowID = nil
@@ -3214,7 +3263,16 @@ public struct ChatFeature {
     // (newest) so the chat opens/re-hydrates parked at the latest rows, discarding any prior
     // scroll-up that revealed older history. Computed after every append above (inflight +
     // reconciled thinking row) so the count is final.
-    state.windowStart = State.bottomWindowStart(count: state.transcript.count)
+    // Calm reconnect carve-out: a PURE refresh (same messages → the rebuild reproduces the
+    // same deterministic ids) leaves a scrolled-up reader exactly where they are — a
+    // foreground re-hydrate must not yank them back to the bottom. Real changes (new rows,
+    // rebuilt ids) still reset: the open/hydrate→bottom contract stays.
+    if wasScrolledUp && !idsBeforeReplace.isEmpty
+      && state.transcript.map(\.id) == idsBeforeReplace {
+      state.windowStart = min(max(0, state.windowStart), state.transcript.count)
+    } else {
+      state.windowStart = State.bottomWindowStart(count: state.transcript.count)
+    }
 
     trace(.hydrateSucceeded, state: state, rowCount: state.transcript.count)
     // Row-provenance diagnostic: emit after hydration so the telemetry receiver can
