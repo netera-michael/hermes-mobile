@@ -113,8 +113,10 @@ public struct ModelOptions: Equatable, Sendable, Decodable {
       if ModelOptions.normalizedForSearch(provider.name).contains(needle) {
         return provider
       }
+      // Raw id OR the friendly label the row shows ("opus 5.5" finds `claude-opus-5-5`).
       let matchingModels = provider.models.filter {
         ModelOptions.normalizedForSearch($0).contains(needle)
+          || ModelOptions.normalizedForSearch(ModelDisplayName.label($0)).contains(needle)
       }
       guard !matchingModels.isEmpty else { return nil }
       return Provider(

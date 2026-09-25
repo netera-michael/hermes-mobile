@@ -90,7 +90,7 @@ struct ModelPickerSheet: View {
   @ViewBuilder
   private func configuredModels(_ provider: ModelOptions.Provider) -> some View {
     ForEach(provider.models, id: \.self) { model in
-      selectableRow(model, selected: model == currentModel) {
+      selectableRow(ModelDisplayName.label(model), selected: model == currentModel) {
         onSelectModel(model, provider.selectionSlug)
       }
       // Reasoning effort drops down under the selected, reasoning-capable model.

@@ -208,7 +208,7 @@ struct ComposerView: View {
   }
 
   private var modelLabel: String {
-    if let model, !model.isEmpty { return model }
+    if let model, !model.isEmpty { return ModelDisplayName.label(model) }
     return "Model"
   }
 }
