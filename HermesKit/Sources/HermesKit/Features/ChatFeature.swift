@@ -3334,10 +3334,20 @@ public struct ChatFeature {
       if let user = inflight.user?.nonEmpty {
         // Newer servers persist the accepted user turn before acknowledging submit, so
         // the very same turn can appear in both `messages` and `inflight.user` on resume.
-        // Only compare the TAIL: an older prompt with identical text must not suppress a
-        // distinct in-flight turn after an intervening assistant reply.
-        let alreadyAtTail = response.messages.last?.role == "user"
-          && response.messages.last?.displayText == user
+        // Compare the TRAILING TURN SEGMENT, not just the literal last row: mid-turn the server
+        // persists assistant/tool rows AFTER the accepted user prompt, so `messages.last` is
+        // rarely the prompt itself (observed live 2026-09-25: dedup_fired=false with the prompt
+        // already in history → duplicate bubble). Walk back from the end; the prompt counts as
+        // "already persisted" if it appears before any COMPLETED assistant reply (non-empty
+        // text), which is the turn boundary separating it from an older identical prompt.
+        var alreadyAtTail = false
+        for message in response.messages.reversed() {
+          if message.role == "assistant", let text = message.displayText, !text.isEmpty { break }
+          if message.role == "user", message.displayText == user {
+            alreadyAtTail = true
+            break
+          }
+        }
         if !alreadyAtTail {
           let userKind = ChatRow.Kind.message(role: .user, text: user, isComplete: true)
           state.transcript.append(ChatRow(
