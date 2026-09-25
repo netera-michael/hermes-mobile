@@ -41,6 +41,21 @@ struct ChatMenuButton: View {
 
       Divider()
 
+      // Destructive section, mirroring the session list's swipe actions: Archive soft-hides
+      // (restorable from Archived sessions), Delete permanently removes (capability-gated).
+      Button("Archive", systemImage: "archivebox", role: .destructive) {
+        store.send(.archiveTapped)
+      }
+      .disabled(store.sessionKey == nil)
+      if store.deleteSupported {
+        Button("Delete", systemImage: "trash", role: .destructive) {
+          store.send(.deleteTapped)
+        }
+        .disabled(store.sessionKey == nil)
+      }
+
+      Divider()
+
       // A `Section` header would be redundant next to three self-describing toggles; the
       // divider is enough to separate "about this session" from "how this chat displays".
       Toggle(isOn: Binding(

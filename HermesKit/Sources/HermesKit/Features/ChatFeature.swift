@@ -127,6 +127,17 @@ public struct ChatFeature {
     /// Draft text for the rename alert. `nil` = alert closed; non-nil = alert open
     /// with the in-progress title (Task 4).
     public var renameDraft: String?
+    /// Which destructive confirmation the ⋯ menu is asking about — `nil` = dialog closed.
+    public var destructiveDialog: DestructiveAction?
+    /// Whether the connected agent supports `DELETE /api/sessions/{id}`. Defaults true
+    /// (like the list); a 404/405 verdict (`RESTError.isMissingEndpointVerdict`) flips it
+    /// off silently — older agents get the Delete item hidden.
+    public var deleteSupported: Bool = true
+
+    public enum DestructiveAction: Equatable, Sendable {
+      case archive
+      case delete
+    }
     /// Token of the copy target most recently tapped — a code block (#9) or a whole
     /// message row (`ChatFeature.rowCopyToken(_:)`, #34) — for the transient "copied"
     /// checkmark. Cleared by a clock-driven effect; the latest copy owns the feedback.
@@ -591,6 +602,7 @@ public struct ChatFeature {
       self.hydrateRetriedAfterTimeout = false
       self.hasHydrated = false
       self.isRefreshingHistory = false
+      self.deleteSupported = true
       self.pendingInteraction = nil
       self.pendingInteractionToken = 0
       self.expectsPendingApproval = false
@@ -916,6 +928,16 @@ public struct ChatFeature {
     case confirmRename
     case renameFailed(previousTitle: String?)
     case cancelRename
+    // Archive / delete from the chat's own ⋯ menu (mirrors the list's swipe semantics):
+    // confirmation dialog → optimistic local state → REST → delegate to the parent for the
+    // slot teardown + list reconciliation on CONFIRMED success.
+    case archiveTapped
+    case deleteTapped
+    case confirmArchive
+    case confirmDelete
+    case archiveFinished(Result<Void, RESTError>)
+    case deleteFinished(Result<Void, RESTError>)
+    case cancelDestructiveDialog
     // Attachments (#8)
     case attachPhotosTapped
     case attachCameraTapped
@@ -1010,6 +1032,13 @@ public struct ChatFeature {
       /// chat's `branchSeed`, so a server-side reap of the never-prompted branch can be
       /// healed by replaying the seeded create.
       case branchCreated(BranchCreation)
+      /// The SERVER CONFIRMED an archive of this chat (from its own ⋯ menu). The parent
+      /// tears the live slot down — same handler the list's archive delegate uses.
+      case sessionArchived(id: String)
+      /// The SERVER CONFIRMED a permanent delete of this chat (from its own ⋯ menu). The
+      /// parent wipes the cached snapshot + tears the slot down WITHOUT a flush (the flush
+      /// would re-save the snapshot being deleted) — same handler as the list's delete.
+      case sessionDeleted(id: String)
 
       /// The `branchCreated` payload: the create response's handle plus the client-held
       /// seed that can rebuild the branch wholesale after an orphan reap.
@@ -2454,6 +2483,90 @@ public struct ChatFeature {
       case .cancelRename:
         state.renameDraft = nil
         return .none
+
+      // MARK: Archive / delete from the ⋯ menu
+
+      case .archiveTapped:
+        // No confirmation on TAP — the dialog below is the confirmation.
+        state.destructiveDialog = .archive
+        return .none
+
+      case .deleteTapped:
+        guard state.deleteSupported else { return .none }
+        state.destructiveDialog = .delete
+        return .none
+
+      case .cancelDestructiveDialog:
+        state.destructiveDialog = nil
+        return .none
+
+      case .confirmArchive:
+        guard state.destructiveDialog == .archive, let id = state.sessionKey else {
+          state.destructiveDialog = nil
+          return .none
+        }
+        state.destructiveDialog = nil
+        let profile = state.scopedProfile
+        let connection = state.connection
+        return .run { [rest] send in
+          do {
+            try await rest.archive(connection, id, true, profile)
+            await send(.archiveFinished(.success(())))
+          } catch let error as RESTError {
+            await send(.archiveFinished(.failure(error)))
+          } catch {
+            await send(.archiveFinished(.failure(RESTError(transport: error))))
+          }
+        }
+
+      case .confirmDelete:
+        guard state.deleteSupported, state.destructiveDialog == .delete, let id = state.sessionKey else {
+          state.destructiveDialog = nil
+          return .none
+        }
+        state.destructiveDialog = nil
+        let profile = state.scopedProfile
+        let connection = state.connection
+        return .run { [rest] send in
+          do {
+            try await rest.deleteSession(connection, id, profile)
+            await send(.deleteFinished(.success(())))
+          } catch let error as RESTError {
+            await send(.deleteFinished(.failure(error)))
+          } catch {
+            await send(.deleteFinished(.failure(RESTError(transport: error))))
+          }
+        }
+
+      case let .archiveFinished(.success):
+        // Server confirmed: the parent tears this slot down (existing delegate handler) and
+        // the list reconciles on its next fetch. Emitted while the slot is still alive — the
+        // handler's teardown guards on the session id.
+        guard let id = state.sessionKey else { return .none }
+        return .send(.delegate(.sessionArchived(id: id)))
+
+      case let .deleteFinished(.success):
+        guard let id = state.sessionKey else { return .none }
+        return .send(.delegate(.sessionDeleted(id: id)))
+
+      case let .archiveFinished(.failure(error)):
+        // Mirror the list: a missing-endpoint verdict never recurs; other failures surface
+        // on the existing error banner. The slot stays up — the user can retry.
+        if error.isMissingEndpointVerdict {
+          state.deleteSupported = false
+          return .none
+        }
+        state.errorBanner = "Archive failed: \(error.message)"
+        return .none
+
+      case let .deleteFinished(.failure(error)):
+        if error.isMissingEndpointVerdict {
+          state.deleteSupported = false
+          return .none
+        }
+        state.errorBanner = "Delete failed: \(error.message)"
+        return .none
+
       }
     }
   }

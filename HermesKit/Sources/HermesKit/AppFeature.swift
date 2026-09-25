@@ -855,6 +855,27 @@ public struct AppFeature {
         else { return listUpdate }
         return .concatenate(listUpdate, teardownSlot())
 
+      case let .liveChat(.delegate(.sessionArchived(id))):
+        // The user archived the OPEN chat from its own ⋯ menu (server already confirmed).
+        // Reuse the list-delegate teardown: pops the slot (its socket must not stream into
+        // an archived session) and seats a fresh chat behind it in regular width.
+        guard let chat = state.liveChat, chat.sessionKey == id else { return .none }
+        return teardownSlot(thenFill: detailRefill(state))
+
+      case let .liveChat(.delegate(.sessionDeleted(id))):
+        // Server-confirmed permanent delete of the OPEN chat: wipe the cached snapshot +
+        // tear the slot down WITHOUT a flush (the flush would re-save the snapshot being
+        // deleted) — the exact asymmetry the list-delegate delete handler enforces.
+        let wipeSnapshot: Effect<Action> = .run { [chatSnapshot] _ in
+          chatSnapshot.deleteSnapshot(id)
+        }
+        guard let chat = state.liveChat, chat.sessionKey == id else {
+          return wipeSnapshot
+        }
+        return .concatenate(
+          teardownSlot(thenFill: detailRefill(state), flushSnapshot: false), wipeSnapshot
+        )
+
       case .onboarding, .connectionFailed, .home, .path, .reauth, .liveChat:
         return .none
       }

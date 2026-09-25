@@ -107,6 +107,18 @@ struct ChatView: View {
       Button("Save") { store.send(.confirmRename) }
       Button("Cancel", role: .cancel) { store.send(.cancelRename) }
     }
+    .confirmationDialog(
+      destructiveTitle,
+      isPresented: destructiveBinding,
+      titleVisibility: .visible
+    ) {
+      Button(destructiveButtonLabel, role: .destructive) {
+        store.send(store.destructiveDialog == .archive ? .confirmArchive : .confirmDelete)
+      }
+      Button("Cancel", role: .cancel) { store.send(.cancelDestructiveDialog) }
+    } message: {
+      Text(destructiveMessage)
+    }
     .task { store.send(.task) }
     // NOTE: no `.onDisappear` here — disappearance is observed by the DESTINATION in
     // `AppView` (`AppFeature.chatViewDisappeared`), which guards a nil slot and forwards
@@ -131,6 +143,28 @@ struct ChatView: View {
         )
       }
     }
+  }
+
+  private var destructiveTitle: String {
+    store.destructiveDialog == .delete ? "Delete session?" : "Archive session?"
+  }
+
+  private var destructiveButtonLabel: String {
+    store.destructiveDialog == .delete ? "Delete" : "Archive"
+  }
+
+  private var destructiveMessage: String {
+    store.destructiveDialog == .delete
+      ? "This permanently deletes the session and its history."
+      : "This hides the session from the list. You can restore it from the server."
+  }
+
+  /// Drives the destructive confirmation dialog; dismissing routes through `.cancelDestructiveDialog`.
+  private var destructiveBinding: Binding<Bool> {
+    Binding(
+      get: { store.destructiveDialog != nil },
+      set: { if !$0 { store.send(.cancelDestructiveDialog) } }
+    )
   }
 
   /// Drives the rename alert's presentation; dismissing routes through `.cancelRename`.
