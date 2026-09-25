@@ -102,7 +102,7 @@ struct ChatView: View {
         ChatMenuButton(store: store)
       }
     }
-    .alert("Rename session", isPresented: renameBinding) {
+    .alert("Rename chat", isPresented: renameBinding) {
       TextField("Title", text: renameDraftBinding)
       Button("Save") { store.send(.confirmRename) }
       Button("Cancel", role: .cancel) { store.send(.cancelRename) }
@@ -146,7 +146,7 @@ struct ChatView: View {
   }
 
   private var destructiveTitle: String {
-    store.destructiveDialog == .delete ? "Delete session?" : "Archive session?"
+    store.destructiveDialog == .delete ? "Delete chat?" : "Archive chat?"
   }
 
   private var destructiveButtonLabel: String {
@@ -155,8 +155,8 @@ struct ChatView: View {
 
   private var destructiveMessage: String {
     store.destructiveDialog == .delete
-      ? "This permanently deletes the session and its history."
-      : "This hides the session from the list. You can restore it from the server."
+      ? "This permanently deletes the chat and its history."
+      : "This hides the chat from Chats. You can restore it from Archived chats."
   }
 
   /// Drives the destructive confirmation dialog; dismissing routes through `.cancelDestructiveDialog`.

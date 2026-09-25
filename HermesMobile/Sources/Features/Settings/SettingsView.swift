@@ -3,8 +3,7 @@ import HermesKit
 import SwiftUI
 import UIKit
 
-/// Settings sheet: server info, token re-paste/clear, manual reconnect, and a link to
-/// the live connection debug log.
+/// Everyday preferences, with connection controls one level deeper under Advanced.
 struct SettingsView: View {
   @Bindable var store: StoreOf<SettingsFeature>
   /// Presentation-only: the "how push works / install the plugin" info sheet. Pure view
@@ -14,37 +13,43 @@ struct SettingsView: View {
 
   var body: some View {
     Form {
-      Section("Server") {
-        LabeledContent("URL", value: store.serverURLString)
+      Section {
+        Picker("Text size", selection: $textSize) {
+          ForEach(TextSizePreference.allCases) { size in
+            Text(size.label).tag(size.rawValue)
+          }
+        }
+      } header: {
+        Text("Appearance")
+      } footer: {
+        Text("Applies to the whole app, including chats. “Match iPhone setting” follows Settings → Display & Brightness → Text Size.")
       }
 
       Section {
-        SecureField("Session token", text: $store.token)
-          .textContentType(.password)
-        Button("Save token") { store.send(.saveTokenTapped) }
-          .disabled(!store.canSaveToken)
-        if store.savedConfirmation {
-          Label("Token saved", systemImage: "checkmark.circle")
-            .foregroundStyle(.green).font(.footnote)
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.showThinkingRows },
+          set: { store.send(.showThinkingRowsToggled($0)) }
+        )) {
+          Label("Show thinking", systemImage: "brain")
+        }
+
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.showToolRows },
+          set: { store.send(.showToolRowsToggled($0)) }
+        )) {
+          Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+        }
+
+        Toggle(isOn: Binding(
+          get: { store.displayPrefs.autoFollowEnabled },
+          set: { store.send(.autoFollowToggled($0)) }
+        )) {
+          Label("Follow new output", systemImage: "arrow.down.to.line")
         }
       } header: {
-        Text("Token")
+        Text("New chats")
       } footer: {
-        Text("Re-paste the stable token if it changed on the server.")
-      }
-
-      Section("Connection") {
-        Button("Reconnect") { store.send(.reconnectTapped) }
-        Button("Copy Connection & Send diagnostics") {
-          store.send(.copyConnectionTraceTapped)
-        }
-        Text("Copies only local timestamps, slot numbers, random send IDs, outcomes and row counts. Review before sharing.")
-          .font(.footnote).foregroundStyle(.secondary)
-        NavigationLink {
-          ConnectionDebugView(entries: store.log)
-        } label: {
-          LabeledContent("Debug log", value: "\(store.log.count)")
-        }
+        Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
       }
 
       // Only offered when the agent supports session deletion — otherwise Archive is the
@@ -62,9 +67,9 @@ struct SettingsView: View {
             Text("Delete").tag(SessionSwipeAction.delete)
           }
         } header: {
-          Text("Session list")
+          Text("Chats")
         } footer: {
-          Text("The action a full swipe on a session row triggers. The long-press menu always offers both.")
+          Text("The action a full swipe on a chat triggers. The long-press menu always offers both.")
         }
       }
 
@@ -165,55 +170,14 @@ struct SettingsView: View {
         }
       }
 
-      Section {
-        Button("Clear token & disconnect", role: .destructive) {
-          store.send(.clearTokenTapped)
-        }
-      } footer: {
-        Text("Removes the token from the Keychain and returns to the connection screen.")
-      }
-
-      Section {
-        Toggle(isOn: Binding(
-          get: { store.displayPrefs.showThinkingRows },
-          set: { store.send(.showThinkingRowsToggled($0)) }
-        )) {
-          Label("Show thinking", systemImage: "brain")
-        }
-
-        Toggle(isOn: Binding(
-          get: { store.displayPrefs.showToolRows },
-          set: { store.send(.showToolRowsToggled($0)) }
-        )) {
-          Label("Show tool calls", systemImage: "wrench.and.screwdriver")
-        }
-
-        Toggle(isOn: Binding(
-          get: { store.displayPrefs.autoFollowEnabled },
-          set: { store.send(.autoFollowToggled($0)) }
-        )) {
-          Label("Follow new output", systemImage: "arrow.down.to.line")
-        }
-      } header: {
-        Text("New chats")
-      } footer: {
-        Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
-      }
-
-      Section {
-        Picker("Text size", selection: $textSize) {
-          ForEach(TextSizePreference.allCases) { size in
-            Text(size.label).tag(size.rawValue)
-          }
-        }
-      } header: {
-        Text("Appearance")
-      } footer: {
-        Text("Applies to the whole app, including chats. “Match iPhone setting” follows Settings → Display & Brightness → Text Size.")
-      }
-
       Section("About") {
         LabeledContent("Version", value: appVersion)
+      }
+
+      Section("Advanced") {
+        NavigationLink("Connection") {
+          AdvancedConnectionView(store: store)
+        }
       }
     }
     .navigationTitle("Settings")
@@ -256,5 +220,58 @@ struct SettingsView: View {
       return "Update to \(latest). \(reason)"
     }
     return "Installed \(installed), latest \(latest). \(reason)"
+  }
+}
+
+/// Keeps the same feature store alive so saving, reconnecting and disconnecting still
+/// run through the existing reducer actions, even when this destination is pushed.
+private struct AdvancedConnectionView: View {
+  @Bindable var store: StoreOf<SettingsFeature>
+
+  var body: some View {
+    Form {
+      Section("Server") {
+        LabeledContent("URL", value: store.serverURLString)
+      }
+
+      Section {
+        SecureField("Session token", text: $store.token)
+          .textContentType(.password)
+        Button("Save token") { store.send(.saveTokenTapped) }
+          .disabled(!store.canSaveToken)
+        if store.savedConfirmation {
+          Label("Token saved", systemImage: "checkmark.circle")
+            .foregroundStyle(.green).font(.footnote)
+        }
+      } header: {
+        Text("Token")
+      } footer: {
+        Text("Re-paste the stable token if it changed on the server.")
+      }
+
+      Section("Connection") {
+        Button("Reconnect") { store.send(.reconnectTapped) }
+        Button("Copy Connection & Send diagnostics") {
+          store.send(.copyConnectionTraceTapped)
+        }
+        Text("Copies only local timestamps, slot numbers, random send IDs, outcomes and row counts. Review before sharing.")
+          .font(.footnote).foregroundStyle(.secondary)
+        NavigationLink {
+          ConnectionDebugView(entries: store.log)
+        } label: {
+          LabeledContent("Debug log", value: "\(store.log.count)")
+        }
+      }
+
+      Section {
+        Button("Clear token & disconnect", role: .destructive) {
+          store.send(.clearTokenTapped)
+        }
+      } footer: {
+        Text("Removes the token from the Keychain and returns to the connection screen.")
+      }
+    }
+    .navigationTitle("Connection")
+    .navigationBarTitleDisplayMode(.inline)
   }
 }

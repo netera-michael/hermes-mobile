@@ -16,13 +16,9 @@ struct SessionRowView: View {
   var isUnread: Bool = false
   /// Whether this session is pinned (shows a small pin glyph).
   var isPinned: Bool = false
-  /// Whether the agent is currently working this session — renders an explicit status cue
-  /// alongside the existing brand-tinted glow.
+  /// Whether the agent is currently working this session — replaces the timestamp
+  /// with a compact status cue.
   var isActive: Bool = false
-
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  /// Drives the gentle opacity pulse of the active glow (held flat when reduce-motion is on).
-  @State private var pulsing = false
 
   private static let relativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
@@ -94,54 +90,5 @@ struct SessionRowView: View {
       }
     }
     .padding(.vertical, 2)
-    .modifier(ActiveGlow(isActive: isActive, reduceMotion: reduceMotion, pulsing: pulsing))
-    .onAppear { updatePulsing() }
-    // Drive the pulse off `isActive` too: when a poll flips it true on a row that's
-    // already on screen (no re-onAppear), this starts the animation; flips to false stop it.
-    .onChange(of: isActive) { updatePulsing() }
-    .onChange(of: reduceMotion) { updatePulsing() }
-  }
-
-  /// Start the repeating pulse while active (and motion is allowed); otherwise hold it flat.
-  private func updatePulsing() {
-    if isActive, !reduceMotion {
-      guard !pulsing else { return }
-      withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
-        pulsing = true
-      }
-    } else if pulsing {
-      withAnimation(.easeInOut(duration: 0.2)) {
-        pulsing = false
-      }
-    }
-  }
-}
-
-/// A subtle brand-tinted border + halo around an actively-working session row.
-/// When reduce-motion is on it stays static; otherwise its opacity gently pulses.
-private struct ActiveGlow: ViewModifier {
-  let isActive: Bool
-  let reduceMotion: Bool
-  let pulsing: Bool
-
-  func body(content: Content) -> some View {
-    guard isActive else { return AnyView(content) }
-    // Reduce-motion: a steady glow. Otherwise pulse between a clearly-visible resting
-    // level and full intensity (the resting level is what a static render shows).
-    let intensity: Double = reduceMotion ? 0.8 : (pulsing ? 1.0 : 0.7)
-    return AnyView(
-      content
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color.hermesAccent.opacity(0.12 * intensity))
-            .overlay(
-              RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.hermesAccent.opacity(0.85 * intensity), lineWidth: 1.5)
-            )
-            .shadow(color: Color.hermesAccent.opacity(0.6 * intensity), radius: 8)
-        )
-    )
   }
 }

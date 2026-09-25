@@ -193,13 +193,10 @@ struct PreferencesClientTests {
 
   // MARK: Display prefs (#55)
 
-  @Test func inMemoryDisplayPrefsDefaultToPreFeatureBehavior() {
+  @Test func inMemoryDisplayPrefsDefaultToQuietActivity() {
     let prefs = PreferencesClient.inMemory()
-    // Every one of these must default to what the app did before the feature existed —
-    // absent-and-unset has to mean "rows shown, following on", or an upgrade silently
-    // changes what a user sees.
-    #expect(prefs.loadShowToolRows() == true)
-    #expect(prefs.loadShowThinkingRows() == true)
+    #expect(prefs.loadShowToolRows() == false)
+    #expect(prefs.loadShowThinkingRows() == false)
     #expect(prefs.loadAutoFollowEnabled() == true)
   }
 
@@ -226,10 +223,15 @@ struct PreferencesClientTests {
     suite.removePersistentDomain(forName: "hermes.prefs.test.display")
     let prefs = PreferencesClient.live(defaults: suite)
 
-    // Absent keys → the pre-feature behavior.
+    // Absent activity keys use the quiet default; following remains enabled.
+    #expect(prefs.loadShowToolRows() == false)
+    #expect(prefs.loadShowThinkingRows() == false)
+    #expect(prefs.loadAutoFollowEnabled() == true)
+
+    prefs.saveShowToolRows(true)
+    prefs.saveShowThinkingRows(true)
     #expect(prefs.loadShowToolRows() == true)
     #expect(prefs.loadShowThinkingRows() == true)
-    #expect(prefs.loadAutoFollowEnabled() == true)
 
     prefs.saveShowToolRows(false)
     prefs.saveShowThinkingRows(false)
@@ -249,7 +251,7 @@ struct PreferencesClientTests {
 
     prefs.saveShowToolRows(false)
     #expect(prefs.loadShowToolRows() == false)
-    #expect(prefs.loadShowThinkingRows() == true)
+    #expect(prefs.loadShowThinkingRows() == false)
     #expect(prefs.loadAutoFollowEnabled() == true)
   }
 }

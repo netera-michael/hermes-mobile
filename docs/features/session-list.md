@@ -6,26 +6,34 @@ Normative invariants moved out of `CLAUDE.md` (2026-08-14 restructure). The shor
 
 ## Grouping & archived
 
+User-facing navigation calls sessions **Chats** and cron jobs **Scheduled**: the main
+header, search prompt, empty states, new-chat accessibility label, archive entry/sheet,
+and ChatView rename/archive/delete wording use "chat". The organize-menu toggle is
+"Show Scheduled"; its section header is "Scheduled". This is presentation-only:
+`Session`, `CronJob`, REST/RPC names, persisted preference keys, and backend behavior
+remain unchanged. Technical documentation below retains those model/API terms.
+
 Session-list grouping is a persisted UI pref (`SessionGroupingMode`: `.workspace` /
 `.chronological`) in `PreferencesClient` — display-only over the one fetched `sessions` array
 (no fetch/order change), reset on logout. The list is a flat `.listStyle(.plain)`; grouping
-options + the **Archived sessions** entry live in a top-trailing `Menu`; "New chat" is a bottom
+options + the **Archived chats** entry live in a top-trailing `Menu`; "New chat" is a bottom
 bar via **`.safeAreaInset(edge: .bottom)`** (a `.bottomBar` toolbar renders blank in the
 snapshot host). **Archived** is a server query (`?archived=only`) shown in a sheet
 (`ArchivedSessionsFeature`); restore = `archive(id, false)`; tap-to-open bubbles up the existing
 `openSession` delegate.
 
-## Cron sessions & the Cron Jobs section (#24)
+## Cron sessions & the Scheduled section (#24)
 
 **Cron sessions** (`source == "cron"`, decoded onto `Session` via `SessionListDTO`) are pulled
-into an **always-on, separate "Cron Jobs" section** — orthogonal to the grouping mode (no new
-`SessionGroupingMode` case). The partition lives in the reducer's computed state (`cronSessions`
+into a **separate "Scheduled" section** (shown by default, toggleable in Organize) —
+orthogonal to the grouping mode (no new `SessionGroupingMode` case). The partition lives
+in the reducer's computed state (`cronSessions`
 vs the non-cron `interactiveSessions` that feeds
 `pinnedSessions`/`groups`/`chronologicalSessions`), so cron rows never appear in
 Pinned/workspace/chronological. Rendered with a `clock`-icon header below the interactive
 sections, and **not shown during search** (search stays flat).
 
-**The Cron Jobs section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
+**The Scheduled section groups runs under their *jobs*, desktop-style**: `GET /api/cron/jobs` is
 fetched sequentially INSIDE the session-load effect (after `.sessionsResponse`, same CancelID —
 deterministic TestStore order, no racy merge); a run session binds to its job via the
 id-embedded prefix (`cron_{job_id}_{ts}` → `CronJob.jobID(fromSessionID:)`) — upstream has a
@@ -180,11 +188,11 @@ likewise listed first (full-swipe deletes, immediately).
 
 **Rows are natural-height — no min-height floor**: a one-line row lands around ~44pt total,
 and its trailing swipe buttons render as iOS's compact text capsules (the icon-over-label
-style needs a taller row). An active row keeps the existing reduce-motion-aware glow and
-replaces its trailing timestamp in-place with a mini `ProgressView` + **Working** label; the
-separate leading orange dot remains exclusively the unread marker. **Working means
-server-confirmed running** (`runningChanged` from the open chat, or a poll row with
-fresher activity than an authoritative stop): a poll must not resurrect the glow from
+style needs a taller row). An active row replaces its trailing timestamp with a mini
+`ProgressView` + **Working** label; there is no pulsing border or halo, and the leading
+orange dot remains exclusively the unread marker. **Working means server-confirmed
+running** (`runningChanged` from the open chat, or a poll row with fresher activity
+than an authoritative stop): a poll must not resurrect the Working cue from
 the server's 300-second recent-activity `is_active` heuristic after the open chat
 reported `runningChanged(false)` (`stoppedBaselines` in `SessionListFeature`). A content floor was tried
 twice for #73 — 48pt (~70pt cells) and

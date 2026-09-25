@@ -26,19 +26,19 @@ struct ChatDisplayPrefsReductionTests {
     let prefs = PreferencesClient.inMemory()
     let store = makeStore(prefs: prefs)
 
-    await store.send(.showToolRowsToggled(false)) {
-      $0.displayPrefs.showToolRows = false
+    await store.send(.showToolRowsToggled(true)) {
+      $0.displayPrefs.showToolRows = true
     }
-    await store.send(.showThinkingRowsToggled(false)) {
-      $0.displayPrefs.showThinkingRows = false
+    await store.send(.showThinkingRowsToggled(true)) {
+      $0.displayPrefs.showThinkingRows = true
     }
     await store.send(.autoFollowToggled(false)) {
       $0.displayPrefs.autoFollowEnabled = false
     }
 
     // Each toggle reached the persistence layer — the pref survives the slot.
-    #expect(prefs.loadShowToolRows() == false)
-    #expect(prefs.loadShowThinkingRows() == false)
+    #expect(prefs.loadShowToolRows() == true)
+    #expect(prefs.loadShowThinkingRows() == true)
     #expect(prefs.loadAutoFollowEnabled() == false)
   }
 
@@ -55,11 +55,11 @@ struct ChatDisplayPrefsReductionTests {
   @Test func togglesAreIndependentOfEachOther() async {
     let store = makeStore()
 
-    await store.send(.showToolRowsToggled(false)) {
-      $0.displayPrefs.showToolRows = false
+    await store.send(.showToolRowsToggled(true)) {
+      $0.displayPrefs.showToolRows = true
     }
     // The other two are untouched.
-    #expect(store.state.displayPrefs.showThinkingRows == true)
+    #expect(store.state.displayPrefs.showThinkingRows == false)
     #expect(store.state.displayPrefs.autoFollowEnabled == true)
   }
 
@@ -67,19 +67,18 @@ struct ChatDisplayPrefsReductionTests {
   /// earlier session is honoured on open.
   @Test func firstAppearanceSeedsPrefsFromPersistence() async {
     let prefs = PreferencesClient.inMemory()
-    prefs.saveShowToolRows(false)
-    prefs.saveShowThinkingRows(false)
+    prefs.saveShowToolRows(true)
+    prefs.saveShowThinkingRows(true)
     prefs.saveAutoFollowEnabled(false)
 
     let store = makeStore(prefs: prefs)
-    // The default before `.task` is the pre-feature behavior — seeding is what applies the
-    // user's actual choice.
+    // The initializer is safe before `.task`; seeding applies the saved choice.
     #expect(store.state.displayPrefs == .default)
 
     await store.send(.task) {
       $0.hasStarted = true
       $0.displayPrefs = ChatDisplayPrefs(
-        showToolRows: false, showThinkingRows: false, autoFollowEnabled: false
+        showToolRows: true, showThinkingRows: true, autoFollowEnabled: false
       )
     }
     // The guard opens the socket effect, which is long-lived by design — this test asserts

@@ -5,8 +5,9 @@ import Foundation
 /// settings for the transcript, and the gateway's own `display.show_reasoning` governs the
 /// CLI/TUI, not this client.
 ///
-/// All three default to the pre-feature behavior (everything shown, following on) so an
-/// upgrade never silently changes what a user sees.
+/// Activity is quiet by default: tool and completed thinking rows are hidden, but the
+/// live thinking indicator remains visible while a turn runs. Existing explicit choices
+/// remain persisted; following stays enabled.
 ///
 /// Filtering happens on the ROW LIST handed to the renderer, never inside the reducer's
 /// `transcript`: the reducer's rows are the source of truth for windowing, row identity,
@@ -14,17 +15,17 @@ import Foundation
 /// simply not rendered — it is not deleted, and turning the pref back on brings it back
 /// without a re-fetch.
 public struct ChatDisplayPrefs: Equatable, Sendable {
-  /// Render tool/skill activity rows (`tool.start` / `tool.complete`).
+  /// Show agent activity in the transcript when enabled; the live progress cue remains visible.
   public var showToolRows: Bool
-  /// Render the live/frozen "Thinking" disclosure rows.
+  /// Keep the live thinking indicator visible; toggle frozen reasoning disclosures.
   public var showThinkingRows: Bool
   /// Follow new content to the bottom while a turn streams. When `false`, the viewport
   /// stays where the user left it and only an explicit "jump to latest" moves it.
   public var autoFollowEnabled: Bool
 
   public init(
-    showToolRows: Bool = true,
-    showThinkingRows: Bool = true,
+    showToolRows: Bool = false,
+    showThinkingRows: Bool = false,
     autoFollowEnabled: Bool = true
   ) {
     self.showToolRows = showToolRows
@@ -45,10 +46,12 @@ public struct ChatDisplayPrefs: Equatable, Sendable {
   /// output, and the user's own messages are ALWAYS kept: the prefs govern agent ACTIVITY
   /// reporting only. An answer must never be hideable by a display toggle — that would turn
   /// a readability pref into silent data loss.
+  /// Activity remains inspectable on demand. Only the live thinking row stays
+  /// visible with the quiet default, so the user can tell Hermes is working.
   public func shows(_ row: ChatRow) -> Bool {
     switch row.kind {
     case .tool: return showToolRows
-    case .thinking: return showThinkingRows
+    case let .thinking(_, _, _, isComplete): return showThinkingRows || !isComplete
     case .message, .status, .commandOutput: return true
     }
   }

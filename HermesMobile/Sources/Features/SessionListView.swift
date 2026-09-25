@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The session list: a flat (Codex-style) list, searchable, pull-to-refresh. Grouping
 /// (by workspace / chronological) is chosen from the top-trailing menu, which also opens
-/// the Archived sessions sheet. "New chat" lives in the bottom bar (alongside the iOS 26
+/// the Archived chats sheet. "New chat" lives in the bottom bar (alongside the iOS 26
 /// bottom search field).
 struct SessionListView: View {
   @Bindable var store: StoreOf<SessionListFeature>
@@ -35,7 +35,7 @@ struct SessionListView: View {
     .listSectionSeparator(.hidden) // flat list — no section hairlines (row hairlines hidden per-row)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
-        ContentUnavailableView("No sessions", systemImage: "bubble.left.and.bubble.right")
+        ContentUnavailableView("No chats", systemImage: "bubble.left.and.bubble.right")
       }
     }
     // Applied BEFORE the bottom `safeAreaInset` so the toast floats inside the list area,
@@ -43,12 +43,12 @@ struct SessionListView: View {
     .overlay(alignment: .bottom) {
       CopiedToastView(token: store.copiedIDToastToken)
     }
-    // The profile pill is the centered (principal) title; "Sessions" is a list section
-    // header instead, leaving room for future sibling sections (e.g. "Cron jobs"). The
+    // The profile pill is the centered (principal) title; "Chats" is a list section
+    // header instead, leaving room for sibling sections (e.g. "Scheduled"). The
     // pill needs the inline bar, so keep the nav title empty + inline in both cases.
     .navigationTitle("")
     .navigationBarTitleDisplayMode(.inline)
-    .searchable(text: $store.searchQuery, prompt: "Search sessions")
+    .searchable(text: $store.searchQuery, prompt: "Search chats")
     .refreshable { store.send(.pulledToRefresh) }
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
@@ -79,7 +79,7 @@ struct SessionListView: View {
     .task { store.send(.task) }
     .onDisappear { store.send(.onDisappear) }
     .alert(
-      "Rename session",
+      "Rename chat",
       isPresented: Binding(
         get: { store.renamingID != nil },
         set: { presented in if !presented { store.send(.cancelRename) } }
@@ -131,13 +131,13 @@ struct SessionListView: View {
     }
   }
 
-  /// The non-search list body: the "Sessions" header, the pinned section, the interactive
-  /// sessions (workspace groups or chronological), then the always-on Cron Jobs section.
+  /// The non-search list body: the "Chats" header, the pinned section, the interactive
+  /// sessions (workspace groups or chronological), then the Scheduled section.
   /// Extracted from `body` to keep the `List` builder within the compiler's type-check
   /// budget.
   @ViewBuilder
   private var sessionListContent: some View {
-    // Top-level "Sessions" section header. Future sibling areas (e.g. "Cron jobs")
+    // Top-level "Chats" section header. Sibling areas (e.g. "Scheduled")
     // render their own header the same way, all scoped to the active profile pill.
     sessionsSectionHeader
     // Pinned sessions float to the top in both grouping modes.
@@ -154,7 +154,7 @@ struct SessionListView: View {
         groupSection(group)
       }
     case .chronological:
-      // Match Desktop's recency lanes. The top-level "Sessions" header names today's
+      // Match Desktop's recency lanes. The top-level "Chats" header names today's
       // newest lane; older calendar buckets get their own dividers. Pinned rows remain
       // in the separate Pinned section above and branch children stay with their parent.
       ForEach(SessionDateGrouping.groups(store.chronologicalEntries, now: store.now)) { group in
@@ -182,16 +182,16 @@ struct SessionListView: View {
 
   /// Top-level content section header. The active profile is shown in the pill (the
   /// centered nav title); this labels the sessions list as one section so future sibling
-  /// sections (e.g. "Cron jobs") can sit alongside it under the same profile.
+  /// sections (e.g. "Scheduled") can sit alongside it under the same profile.
   private var sessionsSectionHeader: some View {
-    Text("Sessions")
+    Text("Chats")
       .font(.title2.weight(.bold))
       .listRowSeparator(.hidden)
       .listRowBackground(Color.clear)
       .accessibilityAddTraits(.isHeader)
   }
 
-  /// Always-on "Cron Jobs" section. When the agent exposes `/api/cron/jobs` the rows are
+  /// "Scheduled" section. When the agent exposes `/api/cron/jobs` the rows are
   /// the *jobs* (state dot, next-run countdown, unread dot), desktop-style: tapping a job
   /// expands a single-open inline peek of its recent *runs* (standard `row(_:)`, so
   /// tap-to-open and unread styling stay identical); a context menu offers Run now /
@@ -229,11 +229,11 @@ struct SessionListView: View {
     }
   }
 
-  /// "Cron Jobs" header with the aggregate unread badge (count of cron runs with unseen
-  /// output — the desktop's `CRON JOBS 4`), so activity is visible even from the header.
+  /// "Scheduled" header with the aggregate unread badge (count of cron runs with unseen
+  /// output), so activity is visible even from the header.
   private var cronSectionHeader: some View {
     HStack(spacing: 8) {
-      Label("Cron Jobs", systemImage: "clock")
+      Label("Scheduled", systemImage: "clock")
         .font(.title2.weight(.bold))
       if store.cronUnreadCount > 0 {
         Text("\(store.cronUnreadCount)")
@@ -242,7 +242,7 @@ struct SessionListView: View {
           .padding(.horizontal, 7)
           .padding(.vertical, 2)
           .background(Color.hermesAccent, in: Capsule())
-          .accessibilityLabel("\(store.cronUnreadCount) unread cron runs")
+          .accessibilityLabel("\(store.cronUnreadCount) unread scheduled runs")
       }
       Spacer()
     }
@@ -337,7 +337,7 @@ struct SessionListView: View {
   /// Safari-style centered pill in the navigation bar: the active profile's icon (a house
   /// for the default profile; none for custom ones), its name, and a chevron. Tapping it
   /// opens the profile `Menu`. Rendered only when the agent supports profiles
-  /// (`profilesSupported`); otherwise the static "Sessions" title is shown instead.
+  /// (`profilesSupported`); the "Chats" list heading is separate from the nav title.
   private var profilePill: some View {
     Menu {
       profileMenuContent
@@ -412,8 +412,8 @@ struct SessionListView: View {
       ?? (store.selectedProfileName == SessionListFeature.State.defaultProfileName)
   }
 
-  /// The bottom "new session" button — a trailing circular FAB in the Hermes accent
-  /// (icon-only: it starts a new session, not a chat). Rendered via `safeAreaInset` so the
+  /// The bottom "New chat" button — a trailing circular FAB in the Hermes accent
+  /// (icon-only; starts a new session). Rendered via `safeAreaInset` so the
   /// list content scrolls clear of it.
   private var newChatBar: some View {
     HStack {
@@ -428,14 +428,14 @@ struct SessionListView: View {
           .background(Color.hermesAccent, in: Circle())
           .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
       }
-      .accessibilityLabel("New session")
+      .accessibilityLabel("New chat")
     }
     .padding(.horizontal)
     .padding(.vertical, 8)
   }
 
   /// Top-trailing menu: choose the grouping mode (checkmark on the active one), then a
-  /// divider and the Archived sessions entry. Mirrors the Codex "Organize / Manage" menu.
+  /// divider and the Archived chats entry. Mirrors the Codex "Organize / Manage" menu.
   private var organizeMenu: some View {
     Menu {
       Picker(
@@ -456,7 +456,7 @@ struct SessionListView: View {
         get: { store.showCronSection },
         set: { store.send(.setShowCronSection($0)) }
       )) {
-        Label("Cron Jobs section", systemImage: "clock")
+        Label("Show Scheduled", systemImage: "clock")
       }
 
       Divider()
@@ -464,7 +464,7 @@ struct SessionListView: View {
       Button {
         store.send(.archivedButtonTapped)
       } label: {
-        Label("Archived sessions", systemImage: "archivebox")
+        Label("Archived chats", systemImage: "archivebox")
       }
     } label: {
       Label("Organize", systemImage: "line.3.horizontal.decrease.circle")

@@ -28,15 +28,13 @@ public struct PreferencesClient: Sendable {
   /// pref; defaults to `true` (shown) so the section stays visible until the user opts out.
   public var loadShowCronSection: @Sendable () -> Bool = { true }
   public var saveShowCronSection: @Sendable (_ show: Bool) -> Void
-  /// Whether the transcript renders tool/skill activity rows. Device-local UI pref;
-  /// defaults to `true` (shown) so existing users see no change. Hiding them keeps the
-  /// conversation readable while the agent works (#55) — the rows are pure activity
-  /// reporting, never the answer itself.
-  public var loadShowToolRows: @Sendable () -> Bool = { true }
+  /// Whether the transcript renders tool/skill activity rows. The separate live
+  /// thinking indicator remains visible. Defaults to `false`; an explicit saved choice wins.
+  public var loadShowToolRows: @Sendable () -> Bool = { false }
   public var saveShowToolRows: @Sendable (_ show: Bool) -> Void
-  /// Whether the transcript renders the live/frozen "Thinking" disclosure rows.
-  /// Device-local UI pref; defaults to `true` (shown).
-  public var loadShowThinkingRows: @Sendable () -> Bool = { true }
+  /// Whether the transcript renders frozen "Thinking" disclosure rows. The live
+  /// indicator remains visible. Defaults to `false`; an explicit saved choice wins.
+  public var loadShowThinkingRows: @Sendable () -> Bool = { false }
   public var saveShowThinkingRows: @Sendable (_ show: Bool) -> Void
   /// Whether the transcript follows new rows to the bottom while a turn streams, i.e.
   /// whether arriving content may move the viewport. Device-local UI pref; defaults to
@@ -117,13 +115,12 @@ public extension PreferencesClient {
           : store.bool(forKey: showCronSectionKey)
       },
       saveShowCronSection: { store.set($0, forKey: showCronSectionKey) },
-      // Every display pref below follows the same rule as the cron-section toggle: an
-      // absent key means the pre-feature behavior (rows shown, following on), so an
-      // upgrade never silently changes what a user sees.
-      loadShowToolRows: { store.object(forKey: showToolRowsKey) == nil ? true : store.bool(forKey: showToolRowsKey) },
+      // Absent activity keys adopt the quieter presentation. Explicit saved choices
+      // continue to win; following still defaults to on.
+      loadShowToolRows: { store.object(forKey: showToolRowsKey) == nil ? false : store.bool(forKey: showToolRowsKey) },
       saveShowToolRows: { store.set($0, forKey: showToolRowsKey) },
       loadShowThinkingRows: {
-        store.object(forKey: showThinkingRowsKey) == nil ? true : store.bool(forKey: showThinkingRowsKey)
+        store.object(forKey: showThinkingRowsKey) == nil ? false : store.bool(forKey: showThinkingRowsKey)
       },
       saveShowThinkingRows: { store.set($0, forKey: showThinkingRowsKey) },
       loadAutoFollowEnabled: {
@@ -161,8 +158,8 @@ public extension PreferencesClient {
     let grouping = LockIsolated<SessionGroupingMode>(.default)
     let swipeAction = LockIsolated<SessionSwipeAction>(.default)
     let showCronSection = LockIsolated<Bool>(true)
-    let showToolRows = LockIsolated<Bool>(true)
-    let showThinkingRows = LockIsolated<Bool>(true)
+    let showToolRows = LockIsolated<Bool>(false)
+    let showThinkingRows = LockIsolated<Bool>(false)
     let autoFollowEnabled = LockIsolated<Bool>(true)
     let selectedProfile = LockIsolated<String?>(nil)
     let pushToken = LockIsolated<String?>(nil)

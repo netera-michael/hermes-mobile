@@ -49,7 +49,7 @@ struct ArchivedSessionsView: View {
     .listSectionSeparator(.hidden)
     .overlay {
       if store.sessions.isEmpty, !store.isLoading, store.loadError == nil {
-        ContentUnavailableView("No archived sessions", systemImage: "archivebox")
+        ContentUnavailableView("No archived chats", systemImage: "archivebox")
       }
     }
     .overlay(alignment: .bottom) {

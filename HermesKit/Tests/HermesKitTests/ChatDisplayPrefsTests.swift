@@ -19,16 +19,19 @@ struct ChatDisplayPrefsTests {
 
   // MARK: Defaults
 
-  @Test func defaultsShowEverything() {
+  @Test func defaultsKeepConversationQuietButLiveProgressVisible() {
     let prefs = ChatDisplayPrefs.default
-    #expect(prefs.showToolRows)
-    #expect(prefs.showThinkingRows)
+    #expect(!prefs.showToolRows)
+    #expect(!prefs.showThinkingRows)
     #expect(prefs.autoFollowEnabled)
-    #expect(prefs.showsEverything)
+    #expect(!prefs.showsEverything)
+    let live = row(.thinking(reasoning: "", status: nil, elapsedSeconds: 0, isComplete: false))
+    let finished = row(.thinking(reasoning: "done", status: nil, elapsedSeconds: 2, isComplete: true))
+    #expect(prefs.shows(live))
+    #expect(!prefs.shows(finished))
   }
 
-  /// The initializer's defaults must equal `.default` — the app relies on "absent pref means
-  /// pre-feature behavior", so a drifted default would silently change what users see.
+  /// The initializer's defaults must equal `.default`, including for fresh installs.
   @Test func bareInitMatchesDefault() {
     #expect(ChatDisplayPrefs() == ChatDisplayPrefs.default)
   }
@@ -45,6 +48,8 @@ struct ChatDisplayPrefsTests {
     let thinking = row(.thinking(reasoning: "hmm", status: nil, elapsedSeconds: 3, isComplete: true))
     #expect(ChatDisplayPrefs(showThinkingRows: true).shows(thinking))
     #expect(!ChatDisplayPrefs(showThinkingRows: false).shows(thinking))
+    let live = row(.thinking(reasoning: "live", status: nil, elapsedSeconds: 0, isComplete: false))
+    #expect(ChatDisplayPrefs(showThinkingRows: false).shows(live))
   }
 
   /// Both user and assistant messages survive EVERY combination — including the most
@@ -75,7 +80,7 @@ struct ChatDisplayPrefsTests {
       messageRow(.assistant),
       row(.thinking(reasoning: "r", status: nil, elapsedSeconds: 1, isComplete: true)),
     ]
-    let kept = ChatDisplayPrefs(showToolRows: false).apply(to: rows)
+    let kept = ChatDisplayPrefs(showToolRows: false, showThinkingRows: true).apply(to: rows)
     #expect(kept.count == 3)
     #expect(!kept.contains { if case .tool = $0.kind { return true } else { return false } })
     // The thinking row and both messages survive.
@@ -105,7 +110,7 @@ struct ChatDisplayPrefsTests {
       row(.thinking(reasoning: "r", status: nil, elapsedSeconds: 1, isComplete: true)),
       messageRow(.assistant),
     ]
-    let kept = ChatDisplayPrefs(autoFollowEnabled: false).apply(to: rows)
+    let kept = ChatDisplayPrefs(showToolRows: true, showThinkingRows: true, autoFollowEnabled: false).apply(to: rows)
     #expect(kept.count == 4)
   }
 
@@ -115,7 +120,7 @@ struct ChatDisplayPrefsTests {
       row(.tool(name: "t", title: "T", state: .complete, detail: nil, durationS: nil)),
       messageRow(.assistant),
     ]
-    let kept = ChatDisplayPrefs.default.apply(to: rows)
+    let kept = ChatDisplayPrefs(showToolRows: true, showThinkingRows: true).apply(to: rows)
     #expect(kept.map(\.id) == rows.map(\.id))
   }
 
