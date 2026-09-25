@@ -10,6 +10,7 @@ struct SettingsView: View {
   /// Presentation-only: the "how push works / install the plugin" info sheet. Pure view
   /// state — there's no reducer behavior behind it.
   @State private var showingPushGuide = false
+  @AppStorage(TextSizePreference.storageKey) private var textSize = TextSizePreference.system.rawValue
 
   var body: some View {
     Form {
@@ -197,6 +198,18 @@ struct SettingsView: View {
         Text("New chats")
       } footer: {
         Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
+      }
+
+      Section {
+        Picker("Text size", selection: $textSize) {
+          ForEach(TextSizePreference.allCases) { size in
+            Text(size.label).tag(size.rawValue)
+          }
+        }
+      } header: {
+        Text("Appearance")
+      } footer: {
+        Text("Applies to the whole app, including chats. “Match iPhone setting” follows Settings → Display & Brightness → Text Size.")
       }
 
       Section("About") {

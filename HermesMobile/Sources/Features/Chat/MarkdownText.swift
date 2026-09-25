@@ -1,5 +1,6 @@
 import HermesKit
 import SwiftUI
+import UIKit
 
 /// Renders assistant Markdown with support for fenced code blocks and lists.
 ///
@@ -17,6 +18,9 @@ struct MarkdownText: View {
   /// Invoked with the block's raw text and its token when its copy button is tapped.
   /// When `nil`, no copy button is shown (e.g. previews/snapshots without a store).
   var onCopyCode: ((_ text: String, _ token: String) -> Void)?
+  /// Tracks the in-app text size (a window trait override): prose is UIKit and needs it
+  /// passed explicitly — `UIFont.preferredFont(forTextStyle:)` alone reads the iOS setting.
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -58,7 +62,7 @@ struct MarkdownText: View {
   /// drag-selects any range across the whole block (not just a single line). See
   /// `SelectableText`. List bullets and inline Markdown are baked into the attributed text.
   private func prose(_ value: String) -> some View {
-    SelectableText(attributed: ProseAttributedBuilder.make(value))
+    SelectableText(attributed: ProseAttributedBuilder.make(value, category: UIContentSizeCategory(dynamicTypeSize)))
       .frame(maxWidth: .infinity, alignment: .leading)
   }
 

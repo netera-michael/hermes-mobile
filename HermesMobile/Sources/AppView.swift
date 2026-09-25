@@ -13,6 +13,8 @@ struct AppView: View {
   // reports `.compact` even on a 13" iPad, which would flip the reducer into the stack
   // layout for the whole window.
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+  /// In-app text size (Settings → Text size); applied as a window trait override.
+  @AppStorage(TextSizePreference.storageKey) private var textSize = TextSizePreference.system.rawValue
 
   var body: some View {
     content
@@ -33,6 +35,9 @@ struct AppView: View {
       // branch) rather than the split view for the same reason.
       .onChange(of: horizontalSizeClass, initial: true) { _, sizeClass in
         store.send(.layoutChanged(appLayout(for: sizeClass)))
+      }
+      .onChange(of: textSize, initial: true) { _, value in
+        TextSizePreference.apply(rawValue: value)
       }
   }
 

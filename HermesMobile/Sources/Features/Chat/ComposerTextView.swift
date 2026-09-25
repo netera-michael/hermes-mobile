@@ -321,6 +321,14 @@ struct ComposerTextView: UIViewRepresentable {
   /// Everything the representable pushes into the UIKit view. Internal so a test can pin the
   /// wiring (the capability gate and the caret especially) without a hosting controller.
   func apply(to view: ComposerInputTextView) {
+    // Follow the in-app text size: the window trait override reaches `traitCollection`, but a
+    // font built from the app-wide setting would not.
+    let bodyFont = UIFont.preferredFont(forTextStyle: .body, compatibleWith: view.traitCollection)
+    if view.font != bodyFont {
+      view.font = bodyFont
+      view.placeholderLabel.font = bodyFont
+      view.setNeedsLayout()
+    }
     if view.text != text {
       // Only a *programmatic* change reaches here — typing arrives through the delegate, which
       // leaves the two already in sync — and every such change appends: a slash-suggestion tap

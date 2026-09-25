@@ -45,7 +45,12 @@ struct SelectableText: UIViewRepresentable {
 /// (bold/italic/inline-code/links) to concrete fonts and inlining list bullets. Kept here
 /// (not in HermesKit) because it bridges to `UIFont`/`UIColor`.
 enum ProseAttributedBuilder {
-  static func make(_ value: String) -> NSAttributedString {
+  static func make(_ value: String, category: UIContentSizeCategory = .unspecified) -> NSAttributedString {
+    let traits = UITraitCollection(preferredContentSizeCategory: category)
+    return make(value, bodyFont: UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits))
+  }
+
+  private static func make(_ value: String, bodyFont body: UIFont) -> NSAttributedString {
     let result = NSMutableAttributedString()
     let lines = value.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     for (index, line) in lines.enumerated() {
@@ -53,19 +58,19 @@ enum ProseAttributedBuilder {
       if trimmed.isEmpty {
         // Preserve paragraph breaks.
       } else if let bullet = MarkdownText.listMarker(trimmed) {
-        result.append(plainRun(bullet.marker + "  ", color: .secondaryLabel))
-        result.append(inlineRuns(bullet.content))
+        result.append(plainRun(bullet.marker + "  ", color: .secondaryLabel, body: body))
+        result.append(inlineRuns(bullet.content, body: body))
       } else {
-        result.append(inlineRuns(trimmed))
+        result.append(inlineRuns(trimmed, body: body))
       }
       if index < lines.count - 1 { result.append(NSAttributedString(string: "\n")) }
     }
     return result
   }
 
-  private static func plainRun(_ text: String, color: UIColor) -> NSAttributedString {
+  private static func plainRun(_ text: String, color: UIColor, body: UIFont) -> NSAttributedString {
     NSAttributedString(string: text, attributes: [
-      .font: UIFont.preferredFont(forTextStyle: .body),
+      .font: body,
       .foregroundColor: color,
     ])
   }
@@ -73,17 +78,17 @@ enum ProseAttributedBuilder {
   /// Parse one line of inline Markdown and resolve each run's presentation intent to a
   /// concrete `UIFont`, so bold/italic/code render in a `UITextView` (which, unlike
   /// SwiftUI's `Text`, does not interpret `inlinePresentationIntent` on its own).
-  private static func inlineRuns(_ line: String) -> NSAttributedString {
+  private static func inlineRuns(_ line: String, body: UIFont) -> NSAttributedString {
     let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
     guard let parsed = try? AttributedString(markdown: line, options: options) else {
-      return plainRun(line, color: .label)
+      return plainRun(line, color: .label, body: body)
     }
     let output = NSMutableAttributedString()
     for run in parsed.runs {
       let text = String(parsed[run.range].characters)
       let intent = run.inlinePresentationIntent ?? []
       var attrs: [NSAttributedString.Key: Any] = [
-        .font: font(for: intent),
+        .font: font(for: intent, body: body),
         .foregroundColor: UIColor.label,
       ]
       if let link = run.link {
@@ -95,8 +100,7 @@ enum ProseAttributedBuilder {
     return output
   }
 
-  private static func font(for intent: InlinePresentationIntent) -> UIFont {
-    let base = UIFont.preferredFont(forTextStyle: .body)
+  private static func font(for intent: InlinePresentationIntent, body base: UIFont) -> UIFont {
     if intent.contains(.code) {
       return UIFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
     }
