@@ -30,14 +30,14 @@ struct SettingsView: View {
           get: { store.displayPrefs.showThinkingRows },
           set: { store.send(.showThinkingRowsToggled($0)) }
         )) {
-          Label("Show thinking", systemImage: "brain")
+          Label("Show past thoughts", systemImage: "brain")
         }
 
         Toggle(isOn: Binding(
           get: { store.displayPrefs.showToolRows },
           set: { store.send(.showToolRowsToggled($0)) }
         )) {
-          Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+          Label("Show activity details", systemImage: "wrench.and.screwdriver")
         }
 
         Toggle(isOn: Binding(
@@ -49,7 +49,7 @@ struct SettingsView: View {
       } header: {
         Text("New chats")
       } footer: {
-        Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
+        Text("Defaults for chats you open later. Change the current chat from its ⋯ menu; live progress remains visible.")
       }
 
       // Only offered when the agent supports session deletion — otherwise Archive is the
@@ -174,10 +174,14 @@ struct SettingsView: View {
         LabeledContent("Version", value: appVersion)
       }
 
-      Section("Advanced") {
-        NavigationLink("Connection") {
+      Section {
+        NavigationLink("Connection & diagnostics") {
           AdvancedConnectionView(store: store)
         }
+      } header: {
+        Text("Advanced")
+      } footer: {
+        Text("Server address, sign-in token, connection checks and disconnect.")
       }
     }
     .navigationTitle("Settings")

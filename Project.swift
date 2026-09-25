@@ -104,7 +104,7 @@ let project = Project(
           "CODE_SIGN_STYLE": "Automatic",
           "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
           // Personal fork version (upstream ships 1.0). Bump per personal build Michael tests.
-          "MARKETING_VERSION": "0.1.2",
+          "MARKETING_VERSION": "0.1.3",
           "CURRENT_PROJECT_VERSION": "66",
           // App Store release default — the orange "AppIcon". ONLY App Store submission
           // builds keep it. Debug builds override to the blue "AppIconDev" below, and ALL

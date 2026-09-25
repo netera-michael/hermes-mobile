@@ -62,14 +62,14 @@ struct ChatMenuButton: View {
         get: { store.displayPrefs.showThinkingRows },
         set: { store.send(.showThinkingRowsToggled($0)) }
       )) {
-        Label("Show thinking", systemImage: "brain")
+        Label("Show past thoughts", systemImage: "brain")
       }
 
       Toggle(isOn: Binding(
         get: { store.displayPrefs.showToolRows },
         set: { store.send(.showToolRowsToggled($0)) }
       )) {
-        Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+        Label("Show activity details", systemImage: "wrench.and.screwdriver")
       }
 
       Toggle(isOn: Binding(
