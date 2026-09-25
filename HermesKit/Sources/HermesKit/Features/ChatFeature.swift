@@ -1091,10 +1091,13 @@ public struct ChatFeature {
 
   public init() {}
 
-  private func trace(_ kind: ConnectionTraceKind, state: State, rowCount: Int? = nil) {
+  /// Telemetry is keyed by the STORED session id (`sessionKey`), never the live id: the live
+  /// id is re-minted on every reconnect, which split one chat's timeline across ids.
+  private func trace(_ kind: ConnectionTraceKind, state: State, rowCount: Int? = nil,
+                     reason: ConnectionTraceReason? = nil, attempt: Int? = nil) {
     connectionTrace.append(.init(timestamp: Date(), generation: connectionTrace.currentSlot(),
-                                 kind: kind, sessionID: state.liveSessionID ?? state.sessionKey,
-                                 rowCount: rowCount))
+                                 kind: kind, sessionID: state.sessionKey,
+                                 rowCount: rowCount, reason: reason, attempt: attempt))
   }
 
   public var body: some ReducerOf<Self> {
@@ -1233,10 +1236,14 @@ public struct ChatFeature {
           if let epoch = batch.epoch, let known = state.replayEpoch, epoch != known {
             state.replayCursor = nil
             state.replayEpoch = epoch
+            trace(.replayFailed, state: state, reason: .epochReset)
           } else if batch.truncated {
             // The gap fell off the server's ring — history refetch (the hydrate) is the
             // only honest source. Fold nothing.
+            trace(.replayFailed, state: state, reason: .truncated)
           } else {
+            var folded = 0
+            defer { trace(.replaySucceeded, state: state, rowCount: folded) }
             // Seq gate: skip frames already folded live (or out of order); advance the
             // cursor per folded frame so a later replay never re-sends them.
             for frame in batch.events {
@@ -1246,6 +1253,7 @@ public struct ChatFeature {
                     seq > cursor.seq
               else { continue }
               advanceCursor(frame, into: &state)
+              folded += 1
               let wasAtBottomWindow = state.windowStart >= State.bottomWindowStart(count: state.transcript.count)
               let effect = reduce(event: frame.event, into: &state)
               maintainWindowAfterStreaming(wasAtBottomWindow: wasAtBottomWindow, into: &state)
@@ -1260,6 +1268,7 @@ public struct ChatFeature {
           // An older agent doesn't know `session.events.since` (`-32601`): latch replay
           // off for this slot's lifetime; every later reconnect hydrates directly.
           if error.isUnknownMethod { state.replaySupported = false }
+          trace(.replayFailed, state: state, reason: error.isUnknownMethod ? .unsupported : .error)
           // Every other replay failure is swallowed by design — replay is an optimization
           // over the lossy reconnect, and the trailing hydrate still rebuilds everything.
           // Carve-out: the fold path bypasses the socket-effect debugLog append, so note
@@ -1310,6 +1319,7 @@ public struct ChatFeature {
         // orange "Reconnecting…" banner. Fires only when the blip outlived the grace.
         guard state.status == .reconnecting else { return .none }
         state.showsReconnectBanner = true
+        trace(.bannerShown, state: state, attempt: state.reconnectAttempt)
         return .none
 
       case let .resumeAfterReauth(connection):
@@ -2607,6 +2617,7 @@ public struct ChatFeature {
            state.attachLiveSessionID == nil, // live-attach re-hydration keeps its own path
            !state.hasReplayedBranchSeed {
           state.isRefreshingHistory = !state.transcript.isEmpty
+          trace(.replayStarted, state: state)
           trace(.hydrateStarted, state: state)
           return withBannerCancel(replay(cursor: cursor, thenHydrate: (stored, state.scopedProfile)))
         }
@@ -3775,10 +3786,11 @@ public struct ChatFeature {
       let seed = state.branchSeed
       let profile = state.scopedProfile
       let generation = connectionTrace.currentSlot()
+      let traceSessionID = state.sessionKey
       return .merge(anchor, .run { [gateway, uuid, connectionTrace] send in
         let sendID = UUID()
         connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                     sendID: sendID, kind: .sendStarted, sessionID: sessionID))
+                                     sendID: sendID, kind: .sendStarted, sessionID: traceSessionID))
         // The uploads + submit target the live id, which can be stale after a
         // background→foreground; self-heal the whole upload→submit sequence once on a
         // "session not found" by re-resuming for a fresh id and replaying (#17). The
@@ -3805,7 +3817,7 @@ public struct ChatFeature {
             branchSeed: seed, profile: profile, gateway: gateway, send: send
           )
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: .sendAccepted, sessionID: sessionID))
+                                       sendID: sendID, kind: .sendAccepted, sessionID: traceSessionID))
           // Echo images as thumbnails in the bubble; non-image files (no thumbnail)
           // fall back to their names when there's no typed text.
           let images = attachments.filter { $0.kind == .image }.map(\.data)
@@ -3819,7 +3831,7 @@ public struct ChatFeature {
                                        sendID: sendID,
                                        kind: error.isTimedOut ? .sendTimedOut
                                          : (error.isDisconnected || error == .notConnected
-                                            ? .sendDisconnected : .sendRejected), sessionID: sessionID))
+                                            ? .sendDisconnected : .sendRejected), sessionID: traceSessionID))
           // An old agent without the byte-upload methods → gate the feature off.
           if error.isUnknownMethod {
             await send(.attachmentsUnsupportedDetected)
@@ -3828,7 +3840,7 @@ public struct ChatFeature {
           }
         } catch {
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: .sendDisconnected, sessionID: sessionID))
+                                       sendID: sendID, kind: .sendDisconnected, sessionID: traceSessionID))
           await send(.attachmentUploadFailed(message: GatewayError.disconnected.message))
         }
       })
@@ -3958,16 +3970,17 @@ public struct ChatFeature {
     let seed = state.branchSeed
     let profile = state.scopedProfile
     let generation = connectionTrace.currentSlot()
+    let traceSessionID = state.sessionKey
     return .merge(anchor, .run { [gateway, connectionTrace, now] send in
       let sendID = UUID()
       connectionTrace.append(.init(timestamp: now, generation: generation,
-                                   sendID: sendID, kind: .sendStarted, sessionID: sessionID))
+                                   sendID: sendID, kind: .sendStarted, sessionID: traceSessionID))
       await submitPrompt(
         sessionID: sessionID, storedSessionID: stored, branchSeed: seed,
         profile: profile, gateway: gateway, send: send,
         outcome: { kind in
           connectionTrace.append(.init(timestamp: Date(), generation: generation,
-                                       sendID: sendID, kind: kind, sessionID: sessionID))
+                                       sendID: sendID, kind: kind, sessionID: traceSessionID))
         }
       ) { healedID in
         _ = try await gateway.send("prompt.submit", .object([

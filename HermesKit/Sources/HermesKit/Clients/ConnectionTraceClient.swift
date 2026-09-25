@@ -9,10 +9,14 @@ public enum ConnectionTraceKind: String, CaseIterable, Sendable, Codable {
   case sendStarted, sendAccepted, sendTimedOut, sendDisconnected, sendRejected
   case pollRow, pollFailed, runningChanged
   case hydrateProvenance
+  case replayStarted, replaySucceeded, replayFailed, bannerShown
 }
 
 public enum ConnectionTraceReason: String, Sendable, Codable {
   case poll, stoppedBaseline, newerActivity, staleHeuristic, delegateStart, delegateStop, missingRow
+  /// Replay outcomes: the gap fell off the server ring / the gateway restarted / an older
+  /// agent without `session.events.since` / any other failure (no error text is exported).
+  case truncated, epochReset, unsupported, error
 }
 
 /// Wire schema for the optional mobile-telemetry dashboard plugin. Nil fields encode as null.
@@ -34,6 +38,8 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
   public let inflightUserRow: Bool?
   /// Row-provenance diagnostic: whether the tail-dedup suppressed a duplicate inflight user row.
   public let dedupFired: Bool?
+  /// Reconnect attempt number (bannerShown) — how long an outage lasted in backoff steps.
+  public let attempt: Int?
 
   public init(timestamp: Date, generation: Int, sendID: UUID? = nil,
               kind: ConnectionTraceKind, sessionID: String? = nil,
@@ -41,7 +47,7 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
               baseline: Bool? = nil, rowCount: Int? = nil,
               reason: ConnectionTraceReason? = nil,
               persistedUserRows: Int? = nil, inflightUserRow: Bool? = nil,
-              dedupFired: Bool? = nil) {
+              dedupFired: Bool? = nil, attempt: Int? = nil) {
     self.timestamp = timestamp
     self.generation = generation
     self.sendID = sendID
@@ -65,6 +71,7 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
     self.persistedUserRows = persistedUserRows.map { min(10_000, max(0, $0)) }
     self.inflightUserRow = inflightUserRow
     self.dedupFired = dedupFired
+    self.attempt = attempt.map { min(1_000, max(0, $0)) }
   }
 
   enum CodingKeys: String, CodingKey {
@@ -73,6 +80,7 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
     case displayActive = "display_active", baseline, rowCount = "rows", reason
     case persistedUserRows = "persisted_user_rows"
     case inflightUserRow = "inflight_user_row", dedupFired = "dedup_fired"
+    case attempt
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -92,6 +100,7 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
     try box.encodeIfPresent(persistedUserRows, forKey: .persistedUserRows)
     try box.encodeIfPresent(inflightUserRow, forKey: .inflightUserRow)
     try box.encodeIfPresent(dedupFired, forKey: .dedupFired)
+    try box.encodeIfPresent(attempt, forKey: .attempt)
   }
 
   public var line: String {
@@ -104,6 +113,7 @@ public struct ConnectionTraceEntry: Equatable, Sendable, Encodable {
       + (baseline.map { " baseline=\($0)" } ?? "")
       + (rowCount.map { " rows=\($0)" } ?? "")
       + (reason.map { " reason=\($0.rawValue)" } ?? "")
+      + (attempt.map { " attempt=\($0)" } ?? "")
   }
 }
 
