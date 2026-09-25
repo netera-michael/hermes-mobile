@@ -198,6 +198,10 @@ struct SettingsView: View {
       } footer: {
         Text("Defaults for chats you open afterwards. The ⋯ menu in a chat still overrides them for that chat only.")
       }
+
+      Section("About") {
+        LabeledContent("Version", value: appVersion)
+      }
     }
     .navigationTitle("Settings")
     .navigationBarTitleDisplayMode(.inline)
@@ -220,6 +224,14 @@ struct SettingsView: View {
       )
     }
     .task { store.send(.task) }
+  }
+
+  /// "0.1.0 (66)" — marketing version plus build number, straight from the Info.plist.
+  private var appVersion: String {
+    let info = Bundle.main.infoDictionary
+    let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    return "\(version) (\(build))"
   }
 
   /// Why the update matters, naming both versions when the agent reported one. Kept in the
