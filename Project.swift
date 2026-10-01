@@ -49,7 +49,13 @@ let project = Project(
         // default otherwise hardcodes CFBundleVersion = 1, ignoring the setting).
         "CFBundleShortVersionString": "$(MARKETING_VERSION)",
         "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
-        "UILaunchScreen": ["UIColorName": ""],
+        // Static launch screen (Apple HIG: no splash animation): system-matching background
+        // with the app's own icon tile centred, so cold start never flashes a blank screen.
+        "UILaunchScreen": [
+          "UIColorName": "LaunchBackground",
+          "UIImageName": "LaunchLogo",
+          "UIImageRespectsSafeAreaInsets": true,
+        ],
         // iPad rotates freely in every orientation; the split view adapts (side-by-side
         // in landscape, overlay sidebar in portrait). iPhone keeps Tuist's default set.
         "UISupportedInterfaceOrientations~ipad": [
@@ -104,7 +110,7 @@ let project = Project(
           "CODE_SIGN_STYLE": "Automatic",
           "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
           // Personal fork version (upstream ships 1.0). Bump per personal build Michael tests.
-          "MARKETING_VERSION": "0.1.6",
+          "MARKETING_VERSION": "0.1.7",
           "CURRENT_PROJECT_VERSION": "66",
           // App Store release default — the orange "AppIcon". ONLY App Store submission
           // builds keep it. Debug builds override to the blue "AppIconDev" below, and ALL
