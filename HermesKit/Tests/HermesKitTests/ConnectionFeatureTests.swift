@@ -87,16 +87,16 @@ struct ConnectionFeatureTests {
 
     // Submit/focus-loss checks immediately, pre-empting the typing debounce.
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
     }
 
     await store.send(\.binding.token, "secret") { $0.token = "secret" }
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.tokenValidationResponse.success)
+    await store.send(.connectTapped) { $0.requestGeneration = 2; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(2, .tokenValidationResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
 
     #expect(keychain.loadToken() == "secret")
@@ -111,8 +111,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) { $0.status = .unreachable }
   }
 
   /// `.offline` is a transport failure too — it lands on the same footer as `.unreachable`
@@ -125,8 +125,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) { $0.status = .unreachable }
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) { $0.status = .unreachable }
   }
 
   @Test func reachableButNotHermes() async {
@@ -137,8 +137,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) { $0.status = .notHermes }
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) { $0.status = .notHermes }
   }
 
   @Test func invalidTokenDoesNotStore() async {
@@ -156,8 +156,8 @@ struct ConnectionFeatureTests {
       $0.keychain = keychain
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.tokenValidationResponse.failure) { $0.status = .invalidToken }
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .tokenValidationResponse(.failure)) = $0 { return true }; return false }) { $0.status = .invalidToken }
 
     #expect(keychain.loadToken() == nil)
   }
@@ -185,8 +185,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.onAppear)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
@@ -231,13 +231,16 @@ struct ConnectionFeatureTests {
 
     // Typing resets to idle immediately…
     await store.send(\.binding.serverURL, "mac.tailnet:9119") {
+      $0.requestGeneration = 1
+      $0.capability = nil
+      $0.serverVersion = nil
       $0.serverURL = "mac.tailnet:9119"
       $0.status = .idle
     }
     // …then auto-checks once typing pauses (debounced).
     await clock.advance(by: .milliseconds(600))
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 2; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(2, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
@@ -255,6 +258,9 @@ struct ConnectionFeatureTests {
     }
     // Emptying the field cancels any pending debounced check; no request fires.
     await store.send(\.binding.serverURL, "") {
+      $0.requestGeneration = 1
+      $0.capability = nil
+      $0.serverVersion = nil
       $0.serverURL = ""
       $0.status = .idle
     }
@@ -271,8 +277,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
@@ -297,8 +303,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = passwordCapability(displayName: "Username & Password")
       $0.method = .password
       $0.serverVersion = "0.16.0"
@@ -321,8 +327,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = oauthCapability()
       $0.method = .oauth
       $0.serverVersion = "0.17.0"
@@ -349,8 +355,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = passwordCapability(
         oauthProviders: [nousProvider],
         supportsNativeFlow: true
@@ -379,8 +385,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = ServerAuthCapability(oauthProviders: [nousProvider], isGated: true)
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
@@ -412,8 +418,8 @@ struct ConnectionFeatureTests {
     }
 
     await store.send(.serverFieldCommitted)
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.status = .reachable(version: "0.16.0")
@@ -468,8 +474,9 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.passwordLoginResponse.success)
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .passwordCredentialsReceived) = $0 { return true }; return false })
+    await store.receive({ if case .attemptResponse(1, .passwordLoginResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
 
     #expect(activated.value) // cookies activated into the shared jar
@@ -496,8 +503,8 @@ struct ConnectionFeatureTests {
       $0.keychain = keychain
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.passwordLoginResponse.failure) { $0.status = .invalidCredentials }
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .passwordLoginResponse(.failure)) = $0 { return true }; return false }) { $0.status = .invalidCredentials }
 
     #expect(keychain.loadSession(.shared) == nil)
   }
@@ -521,8 +528,8 @@ struct ConnectionFeatureTests {
       $0.keychain = keychain
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.tokenValidationResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .tokenValidationResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(RESTError.offline.message)
     }
     #expect(keychain.loadToken() == nil)
@@ -544,8 +551,8 @@ struct ConnectionFeatureTests {
       $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in throw RESTError.rateLimited }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.passwordLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .passwordLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(RESTError.rateLimited.message)
     }
   }
@@ -566,8 +573,8 @@ struct ConnectionFeatureTests {
       $0.hermesREST.passwordLogin = { @Sendable _, _, _, _ in throw RESTError.serviceUnavailable }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.passwordLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .passwordLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(RESTError.serviceUnavailable.message)
     }
   }
@@ -601,8 +608,8 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.success)
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
 
     #expect(keychain.loadSession(.shared) == .bearer(bearer))
@@ -632,8 +639,8 @@ struct ConnectionFeatureTests {
     await store.send(.oauthProviderTapped(selfHosted)) {
       $0.selectedOAuthProviderName = "self_hosted"
     }
-    await store.receive(\.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.success)
+    await store.receive(\.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
   }
 
@@ -652,8 +659,8 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .reachable(version: "0.17.0")
     }
 
@@ -674,8 +681,8 @@ struct ConnectionFeatureTests {
       }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed("access_denied (user is not authorized)")
     }
   }
@@ -687,8 +694,8 @@ struct ConnectionFeatureTests {
       $0.oauthLogin.signIn = { @Sendable _, _ in throw OAuthLoginError.timedOut }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(OAuthLoginError.timedOut.message)
     }
   }
@@ -714,8 +721,8 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed("invalid or expired authorization code")
     }
 
@@ -785,8 +792,8 @@ struct ConnectionFeatureTests {
       $0.preferences = preferences
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) { $0.status = .invalidCredentials }
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) { $0.status = .invalidCredentials }
 
     let seeded = tokenStore.current
     #expect(seeded == nil, "a rejected bearer pair must not stay seeded")
@@ -807,8 +814,8 @@ struct ConnectionFeatureTests {
       $0.preferences = PreferencesClient.inMemory()
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(RESTError.serviceUnavailable.message)
     }
 
@@ -847,8 +854,8 @@ struct ConnectionFeatureTests {
       $0.preferences = PreferencesClient.inMemory()
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.success)
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
 
     #expect(keychain.loadSession(.shared) == .bearer(rotated))
@@ -886,8 +893,8 @@ struct ConnectionFeatureTests {
       $0.preferences = PreferencesClient.inMemory()
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) { $0.status = .invalidCredentials }
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) { $0.status = .invalidCredentials }
 
     #expect(
       keychain.loadSession(.shared) == nil,
@@ -928,13 +935,171 @@ struct ConnectionFeatureTests {
       $0.preferences = PreferencesClient.inMemory()
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.send(.connectTapped) // supersedes the first, cancelling it
-    await store.receive(\.oauthLoginResponse.success)
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.send(.connectTapped) { $0.requestGeneration = 2 } // supersedes the first, cancelling it
+    await store.receive({ if case .attemptResponse(2, .oauthLoginResponse(.success)) = $0 { return true }; return false })
     await store.receive(\.delegate.connected)
 
     #expect(tokenStore.current == winner, "the cancelled attempt drained the live pair")
     #expect(keychain.loadSession(.shared) == .bearer(winner))
+  }
+
+  /// Upstream #112: the server field stays editable while the browser sheet is up, but a
+  /// SwiftUI binding can re-observe the SAME value unchanged. Unchanged bindings must be
+  /// inert — no generation bump, no capability reset, and above all NO cancellation of the
+  /// held OAuth attempt.
+  @Test func redundantServerBindingDoesNotCancelAnInFlightSignIn() async {
+    let clock = TestClock()
+    let started = AsyncStream<Void>.makeStream()
+    let release = AsyncStream<Void>.makeStream()
+    let cancelled = LockIsolated(false)
+    let keychain = KeychainClient.inMemory()
+    let store = TestStore(initialState: oauthReadyState()) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.oauthLogin.signIn = { @Sendable _, _ in
+        await withTaskCancellationHandler {
+          started.continuation.yield()
+          for await _ in release.stream { break }
+        } onCancel: {
+          cancelled.setValue(true)
+        }
+        return bearerFixture()
+      }
+      $0.hermesREST.sessions = { @Sendable _, _, _, _ in [] }
+      $0.bearerTokens = BearerTokenStore()
+      $0.keychain = keychain
+      $0.preferences = .inMemory()
+      $0.continuousClock = clock
+    }
+
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    for await _ in started.stream { break }
+    // Re-binding the SAME value: the sign-in must survive intact.
+    await store.send(\.binding.serverURL, store.state.serverURL)
+    #expect(!cancelled.value, "an unchanged binding cancelled the browser task")
+    release.continuation.yield()
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
+    await store.receive(\.delegate.connected)
+    #expect(keychain.loadSession(.shared) == .bearer(bearerFixture()))
+    await store.finish()
+  }
+
+  /// The changed counterpart: with the browser leg still running against the OLD server, a
+  /// real URL change must cancel the attempt outright; and a delayed OLD-server response
+  /// under a NEWURL/generation must be unable to land (generation gate) — it can never
+  /// publish credentials or connect to the old server.
+  @Test func changedServerURLInvalidatesTheDelayedOldServerResponse() async {
+    let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
+    let clock = TestClock()
+    let started = AsyncStream<Void>.makeStream()
+    let cancelled = LockIsolated(false)
+    let store = TestStore(initialState: oauthReadyState()) {
+      ConnectionFeature()
+    } withDependencies: {
+      $0.oauthLogin.signIn = { @Sendable _, _ in
+        try await withTaskCancellationHandler {
+          started.continuation.yield()
+          try await Task.sleep(for: .seconds(60))
+        } onCancel: {
+          cancelled.setValue(true)
+        }
+        return bearerFixture()
+      }
+      $0.bearerTokens = BearerTokenStore()
+      $0.keychain = keychain
+      $0.preferences = preferences
+      $0.continuousClock = clock
+      $0.hermesREST.status = { @Sendable _ in okStatus() }
+    }
+
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    for await _ in started.stream { break }
+    await store.send(\.binding.serverURL, "http://other:9119") {
+      $0.requestGeneration = 2
+      $0.capability = nil
+      $0.serverVersion = nil
+      $0.serverURL = "http://other:9119"
+      $0.status = .idle
+    }
+    #expect(cancelled.value, "cancel before the reachability debounce fires")
+    // The abandoned attempt sends NOTHING (no `oauthLoginResponse`, no `delegate`); only the
+    // debounced re-check of the new URL follows. Even if a delayed old attempt delivered
+    // under generation 1, the gate at `.attemptResponse` would drop it (expected 2 ≠ 1).
+    await clock.advance(by: .milliseconds(600))
+    await store.receive(\.checkServer) { $0.requestGeneration = 3; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(3, .serverStatusResponse) = $0 { return true }; return false }) {
+      $0.capability = .tokenOnly
+      $0.serverVersion = "0.16.0"
+      $0.method = .token
+      $0.status = .reachable(version: "0.16.0")
+    }
+
+    #expect(keychain.loadSession(.shared) == nil)
+    #expect(preferences.loadServerURL() == nil)
+  }
+
+  /// The generation gate, exercised directly: a cancelled attempt can't send at all
+  /// (TCA drops sends from cancelled tasks), so the gate's real job is the attempt that
+  /// WASN'T cancelled — e.g. a response already in flight when the stale send ran. A
+  /// verdict from the old server must be inert, and the gate is the only defense when the
+  /// user retyped the SAME URL (the `parseServerURL == baseURL` guard lets it through).
+  @Test func aStaleAttemptResponseCannotLandUnderANewGeneration() async {
+    let oldServer = URL(string: "http://old.example:9119")!
+    let keychain = KeychainClient.inMemory()
+    let preferences = PreferencesClient.inMemory()
+    let (gate, releaseSignIn) = AsyncStream<Void>.makeStream()
+    // Retyping the SAME URL: the URL guard alone would let the stale OAuth verdict land.
+    var state = oauthReadyState()
+    state.serverURL = "http://old.example:9119"
+    state.serverVersion = "0.17.0"
+    let store = TestStore(initialState: state) {
+      ConnectionFeature()
+    } withDependencies: {
+      // The attempt completes NORMALLY (no cancellation) after the URL change and retype:
+      // its success verdict is in flight and generation-gated, not drop-on-cancel.
+      $0.oauthLogin.signIn = { @Sendable _, _ in
+        for await _ in gate.stream { break }
+        return bearerFixture()
+      }
+      // The re-armed 600 ms debounce fires after the retyped URL; a server answers.
+      $0.hermesREST.status = { @Sendable _ in okStatus() }
+      $0.bearerTokens = BearerTokenStore()
+      $0.keychain = keychain
+      $0.preferences = preferences
+      $0.continuousClock = TestClock()
+    }
+
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    // A genuinely changed URL bumps to 2…
+    await store.send(\.binding.serverURL, "http://other:9119") {
+      $0.requestGeneration = 2
+      $0.capability = nil
+      $0.serverVersion = nil
+      $0.serverURL = "http://other:9119"
+      $0.status = .idle
+    }
+    // …and the user retypes the original URL, re-arming generation 3 while invalidating 1.
+    await store.send(\.binding.serverURL, "http://old.example:9119") {
+      $0.requestGeneration = 3
+      $0.serverURL = "http://old.example:9119"
+      $0.status = .idle
+    }
+    // The old attempt (generation 1) finally returns, credentials validated. Inert: the
+    // generation gate drops it before the reducer's success handler can touch anything.
+    releaseSignIn.continuation.yield()
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
+    #expect(keychain.loadSession(.shared) == nil, "a stale verdict published old credentials")
+    #expect(preferences.loadServerURL() == nil, "a stale verdict connected the old server")
+    // The retyped URL then resolves through its own debounced check (generation 3).
+    await store.receive(\.checkServer) { $0.requestGeneration = 4; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(4, .serverStatusResponse) = $0 { return true }; return false }) {
+      $0.capability = oauthCapability()
+      $0.method = .oauth
+      $0.status = .reachable(version: "0.17.0")
+    }
+    await store.finish()
   }
 
   /// The server field stays editable while the browser sheet is up, and the sign-in tail
@@ -958,16 +1123,19 @@ struct ConnectionFeatureTests {
       $0.hermesREST.status = { @Sendable _ in okStatus() }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
     await store.send(\.binding.serverURL, "http://other:9119") {
+      $0.requestGeneration = 2
+      $0.capability = nil
+      $0.serverVersion = nil
       $0.serverURL = "http://other:9119"
       $0.status = .idle
     }
     // The abandoned attempt sends NOTHING (no `oauthLoginResponse`, no `delegate`); only the
     // debounced re-check of the new URL follows.
     await clock.advance(by: .milliseconds(600))
-    await store.receive(\.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.receive(\.checkServer) { $0.requestGeneration = 3; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(3, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = .tokenOnly
       $0.serverVersion = "0.16.0"
       $0.method = .token
@@ -1167,8 +1335,8 @@ struct ConnectionFeatureTests {
       $0.oauthLogin.signIn = { @Sendable _, _ in throw Unexpected() }
     }
 
-    await store.send(.connectTapped) { $0.status = .validating }
-    await store.receive(\.oauthLoginResponse.failure) {
+    await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
+    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.failure)) = $0 { return true }; return false }) {
       $0.status = .failed(OAuthLoginError.tokenExchange(RESTError(transport: Unexpected())).message)
     }
   }
@@ -1184,8 +1352,8 @@ struct ConnectionFeatureTests {
       $0.hermesREST.status = { @Sendable _ in throw RESTError.unreachable }
     }
 
-    await store.send(.checkServer) { $0.status = .checking }
-    await store.receive(\.serverStatusResponse) {
+    await store.send(.checkServer) { $0.requestGeneration = 1; $0.status = .checking }
+    await store.receive({ if case .attemptResponse(1, .serverStatusResponse) = $0 { return true }; return false }) {
       $0.capability = nil
       $0.serverVersion = nil
       $0.method = .token

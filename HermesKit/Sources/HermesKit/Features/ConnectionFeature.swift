@@ -86,11 +86,12 @@ func performNativeOAuthLogin(
   rest: HermesRESTClient,
   keychain: KeychainClient,
   oauthLogin: OAuthLoginClient,
-  bearerTokens: BearerTokenStore
+  bearerTokens: BearerTokenStore,
+  ownership: BearerStoreClaim? = nil
 ) async -> Result<NativeOAuthLoginSuccess, OAuthFlowError> {
   // Claimed BEFORE the browser leg: everything below is applied only while this attempt is
   // still the one the user is waiting on (rule 4).
-  let claim = bearerTokens.claimOwnership()
+  let claim = ownership ?? bearerTokens.claimOwnership()
   let minted: BearerSession
   do {
     minted = try await oauthLogin.signIn(baseURL, provider)
@@ -166,6 +167,7 @@ public struct ConnectionFeature {
     /// restore the version it displayed before.
     public var serverVersion: String?
     public var status: Status
+    public var requestGeneration = 0
 
     public init(
       serverURL: String = "",
@@ -326,6 +328,7 @@ public struct ConnectionFeature {
 
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
+    indirect case attemptResponse(Int, Action)
     /// The screen appeared — auto-check a pre-filled URL (#38).
     case onAppear
     /// Reachability check (debounced after typing, or fired on submit/focus-loss).
@@ -342,6 +345,7 @@ public struct ConnectionFeature {
     case tokenValidationResponse(Result<ServerConnection, RESTError>)
     /// Password login → cookie session validated → ready to persist + connect.
     case passwordLoginResponse(Result<ServerConnection, RESTError>)
+    case passwordCredentialsReceived(ServerConnection)
     /// Native OAuth login → bearer pair seeded + validated → ready to connect.
     case oauthLoginResponse(Result<ServerConnection, OAuthFlowError>)
     case delegate(Delegate)
@@ -365,31 +369,66 @@ public struct ConnectionFeature {
 
   public var body: some ReducerOf<Self> {
     BindingReducer()
-    Reduce { state, action in
-      switch action {
-      case .binding(\.serverURL):
-        state.status = .idle // a new URL invalidates any prior reachability result
-        // …and so does it invalidate an OAuth attempt still running against the OLD URL: the
-        // browser leg can take minutes while this field stays editable, and its tail persists
-        // credentials, saves the server URL and connects. Retype the URL and that attempt
-        // must not be able to land. (Cancelling never drains the store — see
-        // `performNativeOAuthLogin`.)
-        let dropStaleSignIn: Effect<Action> = .cancel(id: CancelID.oauthLogin)
-        guard !state.serverURL.trimmingCharacters(in: .whitespaces).isEmpty else {
-          return .merge(dropStaleSignIn, .cancel(id: CancelID.urlDebounce))
-        }
-        // Auto-check after the user stops typing (covers paste too).
-        return .merge(
-          dropStaleSignIn,
-          .run { [clock] send in
-            try await clock.sleep(for: .milliseconds(600))
-            await send(.checkServer)
+      .onChange(of: \.serverURL) { _, _ in
+        Reduce { state, _ in
+          // A genuinely CHANGED server URL: bump the request generation (so a delayed
+          // response from the old server cannot land), clear the resolved capability,
+          // detach persistence and invalidate prior reachability. An UNCHANGED binding
+          // (same value re-observed while the OAuth browser sheet is up) never reaches
+          // this scope, so it cannot cancel/reset the held sign-in attempt (#112).
+          state.requestGeneration &+= 1
+          state.capability = nil
+          state.serverVersion = nil
+          bearerTokens.detachPersistence()
+          state.status = .idle // a new URL invalidates any prior reachability result
+          // …and it also invalidates the OAuth attempt still running against the OLD URL:
+          // the browser leg can take minutes while this field stays editable, and its tail
+          // persists credentials, saves the server URL and connects. Retype the URL and
+          // that attempt must not be able to land. (Cancelling never drains the store —
+          // see `performNativeOAuthLogin`.)
+          let dropStaleSignIn: Effect<Action> = .merge(
+            .cancel(id: CancelID.oauthLogin), .cancel(id: CancelID.statusCheck)
+          )
+          guard !state.serverURL.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return .merge(dropStaleSignIn, .cancel(id: CancelID.urlDebounce))
           }
-          .cancellable(id: CancelID.urlDebounce, cancelInFlight: true)
-        )
+          // Auto-check after the user stops typing (covers paste too).
+          return .merge(
+            dropStaleSignIn,
+            .run { [clock] send in
+              try await clock.sleep(for: .milliseconds(600))
+              await send(.checkServer)
+            }
+            .cancellable(id: CancelID.urlDebounce, cancelInFlight: true)
+          )
+        }
+      }
+    Reduce { state, action in
+      var action = action
+      if case let .attemptResponse(generation, response) = action {
+        guard generation == state.requestGeneration else { return .none }
+        action = response
+      }
+      switch action {
+      case .attemptResponse:
+        return .none
 
       case .binding:
-        return .none
+        // Non-URL bindings during a held validating attempt still supersede it (unchanged
+        // upstream behavior); the serverURL case is handled by the `.onChange` above, so an
+        // unchanged URL binding no longer cancels a held OAuth sign-in (upstream #112):
+        // only an actually CHANGED binding lands here.
+        guard state.status == .validating else { return .none }
+        guard case let .binding(binding) = action, binding.keyPath != \.serverURL else {
+          // An unchanged serverURL binding is a re-observation of the same value — the
+          // request-generation bump, capability reset, detach and status reset must NOT
+          // fire, and the OAuth attempt must not be cancelled.
+          return .none
+        }
+        state.requestGeneration &+= 1
+        bearerTokens.detachPersistence()
+        state.status = .reachable(version: state.serverVersion)
+        return .cancel(id: CancelID.oauthLogin)
 
       case .onAppear:
         // A pre-filled URL (launch auto-connect fallback / logout) is validated immediately
@@ -411,6 +450,8 @@ public struct ConnectionFeature {
           state.status = .invalidURL
           return .none
         }
+        state.requestGeneration &+= 1
+        let generation = state.requestGeneration
         state.status = .checking
         return .run { [rest] send in
           do {
@@ -422,9 +463,9 @@ public struct ConnectionFeature {
             if status.authRequired == true {
               providers = (try? await rest.authProviders(url)) ?? nil
             }
-            await send(.serverStatusResponse(.success(status), providers: providers))
+            await send(.attemptResponse(generation, .serverStatusResponse(.success(status), providers: providers)))
           } catch {
-            await send(.serverStatusResponse(.failure(asRESTError(error)), providers: nil))
+            await send(.attemptResponse(generation, .serverStatusResponse(.failure(asRESTError(error)), providers: nil)))
           }
         }
         .cancellable(id: CancelID.statusCheck, cancelInFlight: true)
@@ -474,23 +515,26 @@ public struct ConnectionFeature {
           state.status = .invalidURL
           return .none
         }
+        state.requestGeneration &+= 1
+        let generation = state.requestGeneration
+        bearerTokens.detachPersistence()
         state.status = .validating
         switch state.method {
         case .token:
           // Token path — byte-identical to today: validate with one authenticated call,
           // then persist the token + server URL and signal the parent.
           let connection = ServerConnection(baseURL: url, token: state.token)
-          return .run { [rest, keychain, preferences] send in
+          return .run { [rest] send in
             do {
               _ = try await rest.sessions(connection, 1, 0, .recent)
             } catch {
-              await send(.tokenValidationResponse(.failure(asRESTError(error))))
+              await send(.attemptResponse(generation, .tokenValidationResponse(.failure(asRESTError(error)))))
               return
             }
-            try? keychain.saveSession(.token(connection.token ?? ""))
-            preferences.saveServerURL(connection.baseURL.absoluteString)
-            await send(.tokenValidationResponse(.success(connection)))
+            guard !Task.isCancelled else { return }
+            await send(.attemptResponse(generation, .tokenValidationResponse(.success(connection))))
           }
+          .cancellable(id: CancelID.oauthLogin, cancelInFlight: true)
 
         case .password:
           // Password path: log in for cookies, validate them with one authenticated call,
@@ -498,48 +542,41 @@ public struct ConnectionFeature {
           let provider = state.capability?.passwordProviderName ?? "basic"
           let username = state.username
           let password = state.password
-          return .run { [rest, keychain, preferences] send in
+          return .run { [rest] send in
             let cookieSession: CookieSession
             do {
               cookieSession = try await rest.passwordLogin(url, provider, username, password)
             } catch {
-              await send(.passwordLoginResponse(.failure(asRESTError(error))))
+              await send(.attemptResponse(generation, .passwordLoginResponse(.failure(asRESTError(error)))))
               return
             }
-            // Activate the captured cookies into the shared jar BEFORE the validating call —
-            // otherwise the live REST transport reads an empty `.shared` and 401s.
-            keychain.activateCookieSession(cookieSession)
+            guard !Task.isCancelled else { return }
             let connection = ServerConnection(baseURL: url, auth: .cookie(cookieSession))
-            do {
-              _ = try await rest.sessions(connection, 1, 0, .recent)
-            } catch {
-              await send(.passwordLoginResponse(.failure(asRESTError(error))))
-              return
-            }
-            try? keychain.saveSession(.cookie(cookieSession))
-            preferences.saveServerURL(connection.baseURL.absoluteString)
-            await send(.passwordLoginResponse(.success(connection)))
+            await send(.attemptResponse(generation, .passwordCredentialsReceived(connection)))
           }
+          .cancellable(id: CancelID.oauthLogin, cancelInFlight: true)
 
         case .oauth:
           // Native PKCE path (#19) — the shared login leg, plus this screen's own tail: the
           // server URL is saved only once a sign-in actually succeeded.
           let provider = state.activeOAuthProvider?.name
-          return .run { [rest, keychain, preferences, oauthLogin, bearerTokens] send in
+          let ownership = bearerTokens.claimOwnership()
+          return .run { [rest, keychain, oauthLogin, bearerTokens] send in
             let outcome = await performNativeOAuthLogin(
               baseURL: url,
               provider: provider,
               rest: rest,
               keychain: keychain,
               oauthLogin: oauthLogin,
-              bearerTokens: bearerTokens
+              bearerTokens: bearerTokens,
+              ownership: ownership
             )
             switch outcome {
             case let .success(success):
-              preferences.saveServerURL(success.connection.baseURL.absoluteString)
-              await send(.oauthLoginResponse(.success(success.connection)))
+              guard !Task.isCancelled else { return }
+              await send(.attemptResponse(generation, .oauthLoginResponse(.success(success.connection))))
             case let .failure(error):
-              await send(.oauthLoginResponse(.failure(error)))
+              await send(.attemptResponse(generation, .oauthLoginResponse(.failure(error))))
             }
           }
           // ONE attempt at a time, and only ever the current one: this effect outlives the
@@ -550,6 +587,12 @@ public struct ConnectionFeature {
         }
 
       case let .tokenValidationResponse(.success(connection)):
+        guard parseServerURL(state.serverURL) == connection.baseURL else { return .none }
+        do { try keychain.saveSession(connection.auth) } catch {
+          state.status = .failed("Could not save sign-in credentials.")
+          return .none
+        }
+        preferences.saveServerURL(connection.baseURL.absoluteString)
         return .send(.delegate(.connected(connection)))
 
       case let .tokenValidationResponse(.failure(error)):
@@ -559,7 +602,31 @@ public struct ConnectionFeature {
         }
         return .none
 
+      case let .passwordCredentialsReceived(connection):
+        guard parseServerURL(state.serverURL) == connection.baseURL,
+              case let .cookie(cookie) = connection.auth else { return .none }
+        // Only a generation-checked reducer action may claim the cookie owner.
+        keychain.activateCookieSession(cookie)
+        let generation = state.requestGeneration
+        return .run { [rest] send in
+          do {
+            _ = try await rest.sessions(connection, 1, 0, .recent)
+            try Task.checkCancellation()
+            await send(.attemptResponse(generation, .passwordLoginResponse(.success(connection))))
+          } catch {
+            guard !isCancellation(error) else { return }
+            await send(.attemptResponse(generation, .passwordLoginResponse(.failure(asRESTError(error)))))
+          }
+        }
+        .cancellable(id: CancelID.oauthLogin, cancelInFlight: true)
+
       case let .passwordLoginResponse(.success(connection)):
+        guard parseServerURL(state.serverURL) == connection.baseURL else { return .none }
+        do { try keychain.saveSession(connection.auth) } catch {
+          state.status = .failed("Could not save sign-in credentials.")
+          return .none
+        }
+        preferences.saveServerURL(connection.baseURL.absoluteString)
         return .send(.delegate(.connected(connection)))
 
       case let .passwordLoginResponse(.failure(error)):
@@ -573,6 +640,8 @@ public struct ConnectionFeature {
         return .none
 
       case let .oauthLoginResponse(.success(connection)):
+        guard parseServerURL(state.serverURL) == connection.baseURL else { return .none }
+        preferences.saveServerURL(connection.baseURL.absoluteString)
         return .send(.delegate(.connected(connection)))
 
       case let .oauthLoginResponse(.failure(error)):
