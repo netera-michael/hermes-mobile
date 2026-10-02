@@ -132,10 +132,27 @@ struct ConnectionFailedFeatureTests {
     }
   }
 
-  /// A status in neither band (an unfollowed 3xx, a bogus code) must not inherit either
-  /// band's copy: "it may be down or restarting" for a 302 is a guess stated as fact.
+  @Test(arguments: [300, 301, 302, 303, 304, 307, 308, 399])
+  func redirectsShowSafeServerAddressGuidance(status: Int) {
+    let injectedDetail = "Location: https://secret-host.invalid/?token=secret-token password=secret-password"
+    let failure = ConnectionFailedFeature.State(
+      connection: connection,
+      reason: RESTError.server(status: status, detail: injectedDetail)
+    )
+    #expect(
+      failure.reasonText
+        == "The server requested a redirect (HTTP \(status)), which was refused for security. Check the configured server address."
+    )
+    #expect(!failure.reasonText.lowercased().contains("try again"))
+    for secret in ["Location", "secret-host", "secret-token", "secret-password"] {
+      #expect(!failure.reasonText.contains(secret))
+    }
+    #expect(failure.reasonText == state(reason: .server(status: status)).reasonText)
+  }
+
+  /// Unknown statuses must not inherit a guessed server-failure cause.
   @Test func outOfBandStatusesGetNeutralCopy() {
-    for status in [302, 307, 100, 600] {
+    for status in [100, 299, 600] {
       let text = state(reason: .server(status: status, detail: "moved")).reasonText
       #expect(text.contains("HTTP \(status)"))
       #expect(!text.contains("refused the request"))

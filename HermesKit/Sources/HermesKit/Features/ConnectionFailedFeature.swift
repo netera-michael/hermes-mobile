@@ -170,9 +170,13 @@ public struct ConnectionFailedFeature {
     /// before launch failures stopped landing there, and discarding it left the user with
     /// nothing to act on.
     ///
-    /// Anything outside both bands (an unfollowed 3xx, a bogus code) gets **neutral** copy —
-    /// inheriting the 5xx "it may be down" line for a 302 would be a guess stated as fact.
+    /// Refused redirects need address guidance, never response-supplied destinations or
+    /// details. Other out-of-band statuses get neutral copy rather than a guessed cause.
     static func serverReasonText(status: Int, detail: String?) -> String {
+      if (300..<400).contains(status) {
+        return
+          "The server requested a redirect (HTTP \(status)), which was refused for security. Check the configured server address."
+      }
       if transientRefusalStatuses.contains(status) {
         return
           "The server is turning requests away right now (HTTP \(status)). Try again in a moment."
