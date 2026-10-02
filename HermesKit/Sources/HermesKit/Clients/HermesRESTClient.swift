@@ -59,11 +59,14 @@ public enum RequestAuth: Equatable, Sendable {
   /// `.bearer` regime — `Authorization: Bearer <access_token>`, where the token came from
   /// `BearerTokenStore.validAccessToken` and is therefore known-fresh.
   case bearer(String)
+  case cookie(CookieSessionStore.Lease)
 
   /// The single place an auth header is attached to a request.
   func apply(to request: inout URLRequest) {
     switch self {
     case .none:
+      break
+    case .cookie:
       break
     case let .sessionToken(token):
       request.setValue(token, forHTTPHeaderField: "X-Hermes-Session-Token")
@@ -278,6 +281,70 @@ public struct HermesRESTClient: Sendable {
   /// `RESTError` — the agent answers 400 with a `detail` (not a git checkout, no remote,
   /// non-fast-forward, git missing) that `RESTError.server` carries verbatim.
   public var updatePushPlugin: @Sendable (_ connection: ServerConnection) async throws -> PushPluginUpdateResult
+  /// Dashboard updater: a read-only check, a single explicit start, and a durable result.
+  public var checkAgentUpdate: @Sendable (_ connection: ServerConnection) async throws -> AgentUpdateCheck
+  public var startAgentUpdate: @Sendable (_ connection: ServerConnection) async throws -> String
+  public var agentUpdateStatus: @Sendable (_ connection: ServerConnection) async throws -> AgentUpdateActionStatus
+}
+
+public struct AgentUpdateCheck: Decodable, Equatable, Sendable {
+  public let currentVersion: String
+  public let behind: Int?
+  public let updateAvailable: Bool
+  public let canApply: Bool
+  public let message: String?
+  public let updateCommand: String?
+
+  public init(currentVersion: String, behind: Int?, updateAvailable: Bool, canApply: Bool,
+              message: String? = nil, updateCommand: String? = nil) {
+    self.currentVersion = currentVersion
+    self.behind = behind
+    self.updateAvailable = updateAvailable
+    self.canApply = canApply
+    self.message = message
+    self.updateCommand = updateCommand
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case currentVersion = "current_version", behind
+    case updateAvailable = "update_available", canApply = "can_apply"
+    case message, updateCommand = "update_command"
+  }
+}
+
+public struct AgentUpdateActionStatus: Decodable, Equatable, Sendable {
+  public let running: Bool
+  public let actionID: String?
+  public let exitCode: Int?
+  public let receipt: AgentUpdateReceipt?
+
+  public init(running: Bool, actionID: String?, exitCode: Int? = nil, receipt: AgentUpdateReceipt? = nil) {
+    self.running = running
+    self.actionID = actionID
+    self.exitCode = exitCode
+    self.receipt = receipt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case running, receipt
+    case actionID = "action_id", exitCode = "exit_code"
+  }
+}
+
+public struct AgentUpdateReceipt: Decodable, Equatable, Sendable {
+  public let outcome: String?
+  public let postVersion: String?
+  public let finishedAt: String?
+
+  public init(outcome: String?, postVersion: String? = nil, finishedAt: String? = nil) {
+    self.outcome = outcome
+    self.postVersion = postVersion
+    self.finishedAt = finishedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case outcome, postVersion = "post_version", finishedAt = "finished_at"
+  }
 }
 
 public extension HermesRESTClient {
@@ -291,7 +358,6 @@ public extension HermesRESTClient {
     // A dedicated session for password login so captured cookies live in their own jar,
     // isolated from `.shared`. Inherits the injected session's `protocolClasses` so test
     // mocks still intercept; gets a fresh `HTTPCookieStorage` and accepts all cookies.
-    let cookieSession = makeCookieSession(from: session)
     // One resolution point for the regime → header mapping. For `.bearer` this is where a
     // near-expiry token gets refreshed (single-flight, inside the store) before the call.
     let authFor: @Sendable (ServerConnection) async throws -> RequestAuth = { conn in
@@ -313,7 +379,9 @@ public extension HermesRESTClient {
         }
       },
       passwordLogin: { baseURL, provider, username, password in
-        try await login(
+        let cookieSession = makeCookieSession(from: session)
+        defer { cookieSession.finishTasksAndInvalidate() }
+        return try await login(
           baseURL: baseURL, provider: provider, username: username, password: password,
           session: cookieSession
         )
@@ -498,6 +566,28 @@ public extension HermesRESTClient {
         }
         // Absent `unchanged` (older agent) → assume something changed and ask for the restart.
         return PushPluginUpdateResult(unchanged: response.unchanged ?? false)
+      },
+      checkAgentUpdate: { conn in
+        let url = try makeURL(conn.baseURL, "/api/hermes/update/check", query: [
+          .init(name: "force", value: "true")
+        ])
+        return try await get(url, auth: authFor(conn), session: session)
+      },
+      startAgentUpdate: { conn in
+        let url = try makeURL(conn.baseURL, "/api/hermes/update")
+        let response: AgentUpdateStartResponse = try await postJSON(
+          url, body: Data("{}".utf8), auth: authFor(conn), session: session
+        )
+        guard response.ok, let id = response.actionID, !id.isEmpty else {
+          throw RESTError.server(status: 200, detail: response.message ?? "Update was not accepted by the server.")
+        }
+        return id
+      },
+      agentUpdateStatus: { conn in
+        let url = try makeURL(conn.baseURL, "/api/actions/hermes-update/status", query: [
+          .init(name: "lines", value: "1")
+        ])
+        return try await get(url, auth: authFor(conn), session: session)
       }
     )
   }
@@ -511,6 +601,7 @@ extension HermesRESTClient: DependencyKey {
   public static var testValue: HermesRESTClient {
     var client = HermesRESTClient()
     client.setUnread = { _, _, _, _ in }
+    client.checkAgentUpdate = { _ in throw RESTError.notFound }
     return client
   }
 }
@@ -543,16 +634,57 @@ private let authLog = Logger(subsystem: "me.honcharenko.HermesKit", category: "a
 // (e.g. `HermesProfileClient`) can reuse the exact same request/decoding/validation
 // path rather than duplicating it.
 
+/// The ONE redirect policy for credential-bearing requests (`CookieRedirectGuard` and
+/// `ArtifactResponseGuard` encode the same verdict for their own transports).
+///
+/// Credential-carrying Hermes endpoints never redirect. A cross-origin 307/308 would
+/// otherwise have URLSession transparently re-send the request — including its POST body
+/// (password, PKCE code verifier, refresh token) and its auth headers (session token,
+/// bearer) — to the redirect target. The redirect completion is refused with `nil` so the
+/// task fails without any follow-up request; the transport catch maps that to
+/// `RESTError.unreachable`, whose copy reads "couldn't reach the server" — accurate, since
+/// the configured address never served the call and no credential left the origin.
+///
+/// The instance is shared: the delegate is stateless, and `URLSession(delegate:)` retains
+/// it, so a long-lived static avoids a per-request allocation. Note `URLSession.shared`
+/// cannot take a delegate; callers must use their own session (they all do — the `.shared`
+/// default only feeds configs/protocolClasses into dedicated sessions).
+final class NoRedirectsDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  func urlSession(_ session: URLSession, task: URLSessionTask,
+                  willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                  completionHandler: @escaping (URLRequest?) -> Void) {
+    completionHandler(nil)
+  }
+}
+
+/// The shared stateless instance handed to every credential-bearing transport below.
+let noRedirectsDelegate = NoRedirectsDelegate()
+
 /// Build a dedicated `URLSession` for password login with its own cookie jar so captured
 /// cookies never bleed into `.shared`. Inherits the source session's `protocolClasses`
-/// (so test mocks still intercept) and accepts all cookies.
+/// (so test mocks still intercept) and accepts all cookies. Refuses redirects: a
+/// re-targeted password POST would resend the credentials to a different origin (a 307
+/// or 308 re-sends the body verbatim) where the app has no contract.
 func makeCookieSession(from source: URLSession) -> URLSession {
   let config = URLSessionConfiguration.ephemeral
   config.protocolClasses = source.configuration.protocolClasses
   config.httpCookieStorage = HTTPCookieStorage()
   config.httpCookieAcceptPolicy = .always
   config.httpShouldSetCookies = true
-  return URLSession(configuration: config)
+  return URLSession(configuration: config, delegate: noRedirectsDelegate, delegateQueue: nil)
+}
+
+/// Attach the shared redirect guard to an EXISTING session's configuration for one
+/// credential-bearing round-trip the same way `CookieRedirectGuard` protects cookie
+/// transports. Real native URLSession redirects fire this delegate; test `URLProtocol`s
+/// intercept through `protocolClasses` first, so stubbed suites keep working unchanged.
+///
+/// Returns the guarded session. Uses a non-shared session so the delegate applies —
+/// `URLSession.shared` rejects a delegate. Callers already pass dedicated sessions
+/// (`makeCookieSession` output or the live client's injected session), so the wrap is
+/// cheap and does not disturb per-call-site cookie jars.
+func withNoRedirects(_ session: URLSession) -> URLSession {
+  URLSession(configuration: session.configuration, delegate: noRedirectsDelegate, delegateQueue: nil)
 }
 
 /// POST `/auth/password-login` and capture the `Set-Cookie` jar into a `CookieSession`.
@@ -610,10 +742,10 @@ func resolveAuth(
   case let .token(token):
     return .sessionToken(token)
   case .cookie:
-    return .none
+    return .cookie(try CookieSessionStore.shared.lease(for: connection))
   case .bearer:
     do {
-      let token = try await tokenStore.validAccessToken(refresh: { baseURL, expiring in
+      let token = try await tokenStore.validAccessToken(for: connection, refresh: { baseURL, expiring in
         try await nativeRefresh(baseURL: baseURL, expiring: expiring, session: session)
       })
       return .bearer(token)
@@ -675,7 +807,9 @@ private func nativeTokenPost(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    // The PKCE code verifier and the refresh token are credentials in the body: refuse
+    // any redirect rather than let a 307/308 re-post them cross-origin.
+    (data, response) = try await withNoRedirects(session).data(for: request)
   } catch {
     throw RESTError(transport: error)
   }
@@ -705,6 +839,17 @@ func makeURL(_ base: URL, _ path: String, query: [URLQueryItem] = []) throws -> 
   return url
 }
 
+func authenticatedData(for request: URLRequest, auth: RequestAuth, session: URLSession) async throws -> (Data, URLResponse) {
+  if case let .cookie(lease) = auth {
+    return try await CookieSessionStore.shared.data(for: request, lease: lease, source: session)
+  }
+  var request = request
+  request.httpShouldHandleCookies = false
+  // Token/bearer headers are credentials: refuse redirects so a 30x can never forward
+  // the `X-Hermes-Session-Token` / `Authorization` header to another origin.
+  return try await withNoRedirects(session).data(for: request)
+}
+
 func get<T: Decodable>(_ url: URL, auth: RequestAuth, session: URLSession) async throws -> T {
   var request = URLRequest(url: url)
   auth.apply(to: &request)
@@ -712,7 +857,13 @@ func get<T: Decodable>(_ url: URL, auth: RequestAuth, session: URLSession) async
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await authenticatedData(for: request, auth: auth, session: session)
+  } catch let error as RESTError {
+    // Cookie rotation can revoke the lease; preserve the typed authentication verdict.
+    throw error
+  } catch let error as CancellationError {
+    // A replaced login is abandoned work, not a network outage.
+    throw error
   } catch {
     throw RESTError(transport: error)
   }
@@ -772,7 +923,13 @@ func postJSON<T: Decodable>(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await authenticatedData(for: request, auth: auth, session: session)
+  } catch let error as RESTError {
+    // Cookie rotation can revoke the lease; preserve the typed authentication verdict.
+    throw error
+  } catch let error as CancellationError {
+    // A replaced login is abandoned work, not a network outage.
+    throw error
   } catch {
     throw RESTError(transport: error)
   }
@@ -801,7 +958,13 @@ func send(
   let data: Data
   let response: URLResponse
   do {
-    (data, response) = try await session.data(for: request)
+    (data, response) = try await authenticatedData(for: request, auth: auth, session: session)
+  } catch let error as RESTError {
+    // Cookie rotation can revoke the lease; preserve the typed authentication verdict.
+    throw error
+  } catch let error as CancellationError {
+    // A replaced login is abandoned work, not a network outage.
+    throw error
   } catch {
     throw RESTError(transport: error)
   }
@@ -947,6 +1110,17 @@ private struct PluginUpdateResponse: Decodable {
   let ok: Bool?
   let unchanged: Bool?
   let error: String?
+}
+
+private struct AgentUpdateStartResponse: Decodable {
+  let ok: Bool
+  let actionID: String?
+  let message: String?
+
+  enum CodingKeys: String, CodingKey {
+    case ok, message
+    case actionID = "action_id"
+  }
 }
 
 /// Fetch the plugin hub and map our row onto `PushPluginInfo`. Shared by `pushPluginStatus`

@@ -1060,7 +1060,7 @@ struct ConnectionFeatureTests {
       // The attempt completes NORMALLY (no cancellation) after the URL change and retype:
       // its success verdict is in flight and generation-gated, not drop-on-cancel.
       $0.oauthLogin.signIn = { @Sendable _, _ in
-        for await _ in gate.stream { break }
+        for await _ in gate { break }
         return bearerFixture()
       }
       // The re-armed 600 ms debounce fires after the retyped URL; a server answers.
@@ -1088,7 +1088,7 @@ struct ConnectionFeatureTests {
     }
     // The old attempt (generation 1) finally returns, credentials validated. Inert: the
     // generation gate drops it before the reducer's success handler can touch anything.
-    releaseSignIn.continuation.yield()
+    releaseSignIn.yield()
     await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
     #expect(keychain.loadSession(.shared) == nil, "a stale verdict published old credentials")
     #expect(preferences.loadServerURL() == nil, "a stale verdict connected the old server")
