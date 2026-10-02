@@ -157,7 +157,11 @@ struct PushClientTests {
   private func collect<Value: Sendable>(
     _ count: Int,
     from stream: AsyncStream<Value>,
-    timeout: Duration = .seconds(2)
+    // 10s: the hosted macos-15 runner is 2-core; under full-suite parallel load we
+    // measured 5.7s+ gaps between subscription and collector start (CI 36985603030).
+    // The contract is unaffected — a dropped/reordered/double-delivered value still
+    // fails the exact-array comparison; 10s only stops starvation from faking failure.
+    timeout: Duration = .seconds(10)
   ) async -> [Value] {
     await withTaskGroup(of: [Value]?.self) { group in
       group.addTask {
