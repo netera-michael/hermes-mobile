@@ -179,7 +179,12 @@ jobs:
 
       - name: Environment gate — KeychainClientTests (includes the live Keychain test)
         run: |
-          swift test --package-path HermesKit --filter RESTTransportSuite/KeychainClientTests 2>&1 | tee keychain-suite.log
+          # Filter by the test NAME, not the suite path: run 36987426785 showed
+          # `--filter RESTTransportSuite/KeychainClientTests` matches 0 tests on the
+          # hosted Xcode 26.3 toolchain (nested-suite id format differs), while the
+          # plain-name filter matches on both Xcode 26.3 (hosted) and 26.6 (Mac Air).
+          # Uses the same env var as lane 1's skip, so the two can never drift.
+          swift test --package-path HermesKit --filter "$KEYCHAIN_ENV_TEST" 2>&1 | tee keychain-suite.log
           test ${PIPESTATUS[0]:-0} -eq 0 || exit 1
 
       - name: Live Keychain test must actually appear in the run
