@@ -641,15 +641,15 @@ private let authLog = Logger(subsystem: "me.honcharenko.HermesKit", category: "a
 /// otherwise have URLSession transparently re-send the request — including its POST body
 /// (password, PKCE code verifier, refresh token) and its auth headers (session token,
 /// bearer) — to the redirect target. The redirect completion is refused with `nil` so the
-/// task fails without any follow-up request; the transport catch maps that to
-/// `RESTError.unreachable`, whose copy reads "couldn't reach the server" — accurate, since
-/// the configured address never served the call and no credential left the origin.
+/// original 3xx response is returned without a follow-up request. `validate` maps it
+/// to `RESTError.server` with fixed correct-server-address guidance, never Location
+/// or a potentially credential-bearing redirect response body.
 ///
 /// The instance is shared: the delegate is stateless, and `URLSession(delegate:)` retains
 /// it, so a long-lived static avoids a per-request allocation. Note `URLSession.shared`
 /// cannot take a delegate; callers must use their own session (they all do — the `.shared`
 /// default only feeds configs/protocolClasses into dedicated sessions).
-final class NoRedirectsDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+class NoRedirectsDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
   func urlSession(_ session: URLSession, task: URLSessionTask,
                   willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                   completionHandler: @escaping (URLRequest?) -> Void) {
@@ -674,17 +674,17 @@ func makeCookieSession(from source: URLSession) -> URLSession {
   return URLSession(configuration: config, delegate: noRedirectsDelegate, delegateQueue: nil)
 }
 
-/// Attach the shared redirect guard to an EXISTING session's configuration for one
-/// credential-bearing round-trip the same way `CookieRedirectGuard` protects cookie
-/// transports. Real native URLSession redirects fire this delegate; test `URLProtocol`s
-/// intercept through `protocolClasses` first, so stubbed suites keep working unchanged.
-///
-/// Returns the guarded session. Uses a non-shared session so the delegate applies —
-/// `URLSession.shared` rejects a delegate. Callers already pass dedicated sessions
-/// (`makeCookieSession` output or the live client's injected session), so the wrap is
-/// cheap and does not disturb per-call-site cookie jars.
-func withNoRedirects(_ session: URLSession) -> URLSession {
-  URLSession(configuration: session.configuration, delegate: noRedirectsDelegate, delegateQueue: nil)
+/// Own one guarded round-trip, preserving injected configuration/protocolClasses.
+/// Delegate-backed sessions must be explicitly invalidated even when the operation
+/// throws or is cancelled. The caller's source session remains usable and unowned.
+func withNoRedirects<T>(
+  _ source: URLSession,
+  delegate: NoRedirectsDelegate = noRedirectsDelegate,
+  operation: (URLSession) async throws -> T
+) async rethrows -> T {
+  let session = URLSession(configuration: source.configuration, delegate: delegate, delegateQueue: nil)
+  defer { session.invalidateAndCancel() }
+  return try await operation(session)
 }
 
 /// POST `/auth/password-login` and capture the `Set-Cookie` jar into a `CookieSession`.
@@ -706,6 +706,7 @@ func login(
   do {
     (data, response) = try await session.data(for: request)
   } catch {
+    try Task.checkCancellation()
     throw RESTError(transport: error)
   }
 
@@ -809,8 +810,9 @@ private func nativeTokenPost(
   do {
     // The PKCE code verifier and the refresh token are credentials in the body: refuse
     // any redirect rather than let a 307/308 re-post them cross-origin.
-    (data, response) = try await withNoRedirects(session).data(for: request)
+    (data, response) = try await withNoRedirects(session) { try await $0.data(for: request) }
   } catch {
+    try Task.checkCancellation()
     throw RESTError(transport: error)
   }
 
@@ -847,7 +849,7 @@ func authenticatedData(for request: URLRequest, auth: RequestAuth, session: URLS
   request.httpShouldHandleCookies = false
   // Token/bearer headers are credentials: refuse redirects so a 30x can never forward
   // the `X-Hermes-Session-Token` / `Authorization` header to another origin.
-  return try await withNoRedirects(session).data(for: request)
+  return try await withNoRedirects(session) { try await $0.data(for: request) }
 }
 
 func get<T: Decodable>(_ url: URL, auth: RequestAuth, session: URLSession) async throws -> T {
@@ -890,6 +892,8 @@ func validate(_ response: URLResponse, data: Data, loginSpecific: Bool = false) 
   guard let http = response as? HTTPURLResponse else { throw RESTError.unreachable }
   switch http.statusCode {
   case 200..<300: break
+  case 300..<400:
+    throw RESTError.server(status: http.statusCode, detail: "Server redirect refused. Check the configured server address.")
   case 401: throw RESTError.unauthorized
   case 404: throw RESTError.notFound
   case 429 where loginSpecific: throw RESTError.rateLimited

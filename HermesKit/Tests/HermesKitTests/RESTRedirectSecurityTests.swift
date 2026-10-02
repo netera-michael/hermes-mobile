@@ -15,7 +15,7 @@ import Testing
 // for their own transports; `ArtifactTransportSecurityTests` already covers their sides.
 //
 // Every behavior test asserts two things:
-//   1. the call FAILS — a refused redirect is a transport error, never a "successful"
+//   1. the call FAILS validation — a refused redirect returns the original 3xx, never a "successful"
 //      response from the impostor origin, and
 //   2. the impostor origin received NOTHING — the credential never left its origin.
 //
@@ -50,7 +50,8 @@ private final class RedirectTestServer: @unchecked Sendable {
   private var responseStatus = 200
   private var responseHeaders: [String: String] = [:]
   private var responseBody = Data(#"{"ok":false}"#.utf8)
-  private var responseDelay: UInt64 = 0
+  private var holdResponse = false
+  let admitted = AsyncStream<Void>.makeStream()
 
   private(set) var port: UInt16 = 0
   var received: [Received] { lock.lock(); defer { lock.unlock() }; return _received }
@@ -114,12 +115,12 @@ private final class RedirectTestServer: @unchecked Sendable {
   }
 
   func respondWith(
-    status: Int, headers: [String: String] = [:], body: String = "", delayMs: UInt64 = 0
+    status: Int, headers: [String: String] = [:], body: String = "", hold: Bool = false
   ) {
     responseStatus = status
     responseHeaders = headers
     responseBody = Data(body.utf8)
-    responseDelay = delayMs
+    holdResponse = hold
   }
 
   private let queue = DispatchQueue(label: "me.honcharenko.HermesKit.redirect-test")
@@ -166,7 +167,8 @@ private final class RedirectTestServer: @unchecked Sendable {
       _received.append(record)
       lock.unlock()
     }
-    if responseDelay > 0 { Thread.sleep(forTimeInterval: Double(responseDelay) / 1000) }
+    admitted.continuation.yield(())
+    if holdResponse { return }
     var head = "HTTP/1.1 \(responseStatus) X\r\nContent-Length: \(responseBody.count)\r\nConnection: close\r\n"
     for (name, value) in responseHeaders { head += "\(name): \(value)\r\n" }
     head += "\r\n"
@@ -196,6 +198,17 @@ private final class RedirectTestServer: @unchecked Sendable {
       method: String(requestLine[0]), path: String(requestLine[1]),
       headers: headers, body: body
     )
+  }
+}
+
+private enum LifecycleError: Error { case expected }
+
+private final class InvalidationObserver: NoRedirectsDelegate, @unchecked Sendable {
+  let invalidated = AsyncStream<Void>.makeStream()
+  let count = LockIsolated(0)
+  func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+    count.withValue { $0 += 1 }
+    invalidated.continuation.yield(())
   }
 }
 
@@ -325,20 +338,18 @@ struct RESTRedirectSecurityTests {
 
   /// Bearer REST: `BearerTokenStore` refresh goes through the same helper
   /// (`nativeTokenPost`), which the native tests above already exercise; here the
-  /// authenticated-rest bearer header path is pinned via the shared guard directly.
+  /// production authenticatedData path is exercised through get, including validation.
   @Test func bearerRESTCrossOrigin307Refuses() async throws {
     let (originURL, impostorURL) = try await startBoth()
     defer { stopBoth() }
     originA.respondWith(status: 307, headers: ["Location": harvestLocation(impostorURL)])
 
-    var request = URLRequest(url: originURL.appendingPathComponent("/api/sessions"))
-    request.setValue("Bearer the-access-token", forHTTPHeaderField: "Authorization")
+    let url = originURL.appendingPathComponent("/api/sessions")
     let session = realSession()
     defer { session.finishTasksAndInvalidate() }
-    // Refusing via the delegate hands the ORIGINAL 307 back as the terminating response —
-    // no error, no follow-up. (Client paths map it to a non-2xx RESTError via `validate`.)
-    let (_, response) = try await withNoRedirects(session).data(for: request)
-    #expect((response as? HTTPURLResponse)?.statusCode == 307)
+    await #expect(throws: RESTError.server(status: 307, detail: "Server redirect refused. Check the configured server address.")) {
+      let _: [String: Bool] = try await get(url, auth: .bearer("the-access-token"), session: session)
+    }
     #expect(originA.received.count == 1)
     #expect(originA.received.first?.headers["authorization"] == "Bearer the-access-token")
     assertImpostorSilent(originB)
@@ -379,37 +390,48 @@ struct RESTRedirectSecurityTests {
       .domain: "127.0.0.1", .path: "/", .name: "leaky", .value: "cookie-value",
     ]) { jar.setCookie(cookie) }
 
-    let session = withNoRedirects(URLSession(configuration: config))
+    let session = URLSession(configuration: config)
     defer { session.finishTasksAndInvalidate() }
     var request = URLRequest(url: originURL.appendingPathComponent("/api/status"))
     request.httpShouldHandleCookies = true
 
     // The refusal makes the 303 itself the terminating response (validate-style callers
     // see it as a non-2xx failure); what matters here: the impostor stays silent.
-    _ = try? await session.data(for: request)
+    let (_, response) = try await withNoRedirects(session) { try await $0.data(for: request) }
+    #expect((response as? HTTPURLResponse)?.statusCode == 303)
     #expect(originA.received.count == 1)
     assertImpostorSilent(originB)
   }
 
-  /// No implicit cookie/credential store leakage: the guarded `withNoRedirects` wrap does
-  /// not adopt the source session's cookie handling (`httpShouldHandleCookies` stays the
-  /// request's own), and the login path's dedicated jar never shares with the caller.
-  @Test func guardedSessionKeepsConfigurationButRefusesRedirects() throws {
+  /// Configuration injection is preserved; password-login jars are genuinely isolated.
+  @Test func guardedSessionKeepsConfigurationButRefusesRedirects() async throws {
     let config = URLSessionConfiguration.ephemeral
     config.timeoutIntervalForRequest = 9
+    config.protocolClasses = []
     let source = URLSession(configuration: config)
-    defer { source.finishTasksAndInvalidate() }
-    let guarded = withNoRedirects(source)
-    // A delegate-carrying session cannot be `.shared` and must keep the config's own
-    // timeout (behavioral sanity, not the policy itself).
-    #expect(guarded.configuration.timeoutIntervalForRequest == 9)
-    guarded.finishTasksAndInvalidate()
-
-    // The login session and the client session stay separate jars.
-    guard let sourceURL = URL(string: "http://127.0.0.1:1") else {
-      Issue.record("unreachable"); return
+    defer { source.invalidateAndCancel() }
+    await withNoRedirects(source) { guarded in
+      #expect(guarded.configuration.timeoutIntervalForRequest == 9)
+      #expect(guarded.configuration.protocolClasses?.isEmpty == true)
     }
-    _ = sourceURL
+    let loginSession = makeCookieSession(from: source)
+    defer { loginSession.invalidateAndCancel() }
+    let sourceJar = try #require(source.configuration.httpCookieStorage)
+    let loginJar = try #require(loginSession.configuration.httpCookieStorage)
+    #expect(sourceJar !== loginJar)
+    let (url, _) = try await startBoth()
+    defer { stopBoth() }
+    let cookie = try #require(HTTPCookie(properties: [
+      .domain: "127.0.0.1", .path: "/", .name: "source-only", .value: "dummy-source-cookie",
+    ]))
+    sourceJar.setCookie(cookie)
+    #expect(sourceJar.cookies?.contains(where: { $0.name == "source-only" }) == true)
+    originA.respondWith(status: 200, headers: ["Set-Cookie": "login-only=dummy-login-cookie; Path=/"], body: "{}")
+    let captured = try await login(baseURL: url, provider: "basic", username: "alice",
+                                   password: "dummy-password", session: loginSession)
+    #expect(captured.cookies.contains(where: { $0.name == "login-only" }))
+    #expect(originA.received.first?.headers["cookie"]?.contains("source-only") != true)
+    #expect(sourceJar.cookies?.contains(where: { $0.name == "login-only" }) != true)
   }
 
   /// HTTPS downgrade is the same single refusal: the guard never inspects the Location —
@@ -419,22 +441,67 @@ struct RESTRedirectSecurityTests {
   @Test func delegateRefusesDowngradeAndForeignTargets() {
     let delegate = NoRedirectsDelegate()
     func refused(_ target: String) -> Bool {
-      let completion = LockIsolated<URLRequest?>(nil)
+      let completion = LockIsolated<(Int, URLRequest?)>((0, nil))
+      let session = URLSession(configuration: .ephemeral)
+      defer { session.invalidateAndCancel() }
       delegate.urlSession(
-        URLSession(configuration: .ephemeral),
+        session,
         task: URLSession.shared.dataTask(with: URL(string: "https://placeholder.example/")!),
         willPerformHTTPRedirection: HTTPURLResponse(
           url: URL(string: "https://start.example/a")!, statusCode: 307,
           httpVersion: "HTTP/1.1", headerFields: nil)!,
         newRequest: URLRequest(url: URL(string: target)!)
-      ) { newRequest in completion.setValue(newRequest) }
-      // The delegate completes synchronously.
-      return completion.value == nil
+      ) { newRequest in completion.withValue { $0.0 += 1; $0.1 = newRequest } }
+      // Both no callback and multiple callbacks are failures.
+      return completion.value.0 == 1 && completion.value.1 == nil
     }
     #expect(refused("http://downgrade.example/a"))        // https→http downgrade
     #expect(refused("https://foreign.example/steal"))     // cross-origin https
     #expect(refused("http://127.0.0.1/harvest"))          // cross-origin loopback
     #expect(refused("https://start.example/b"))           // same host, different path
+  }
+
+  @Test(arguments: ["success", "error", "cancellation"])
+  func ownedSessionInvalidatesAfterEveryExit(mode: String) async throws {
+    let (url, _) = try await startBoth()
+    defer { stopBoth() }
+    originA.respondWith(status: 200, body: "{}", hold: mode == "cancellation")
+    let source = realSession()
+    defer { source.invalidateAndCancel() }
+    let observer = InvalidationObserver()
+    let task = Task {
+      try await withNoRedirects(source, delegate: observer) { owned in
+        let result = try await owned.data(from: url)
+        if mode == "error" { throw LifecycleError.expected }
+        return result
+      }
+    }
+    var arrivals = originA.admitted.stream.makeAsyncIterator()
+    _ = await arrivals.next()
+    #expect(originA.received.count == 1)
+    if mode == "cancellation" { task.cancel() }
+    switch mode {
+    case "success": _ = try await task.value
+    case "error": await #expect(throws: LifecycleError.expected) { try await task.value }
+    default:
+      do { _ = try await task.value; Issue.record("cancelled request succeeded") }
+      catch { #expect(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+    }
+    var invalidations = observer.invalidated.stream.makeAsyncIterator()
+    _ = await invalidations.next()
+    #expect(observer.count.value == 1)
+    // The owned wrapper must never invalidate its injected source.
+    originB.respondWith(status: 200, body: "{}")
+    let (_, response) = try await source.data(from: URL(string: "http://127.0.0.1:\(originB.port)")!)
+    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+  }
+
+  @Test func redirectGuidanceDoesNotReflectResponseSecrets() throws {
+    let response = try #require(HTTPURLResponse(url: URL(string: "https://example.invalid")!,
+      statusCode: 308, httpVersion: nil, headerFields: ["Location": "https://dummy-secret.invalid"]))
+    #expect(throws: RESTError.server(status: 308, detail: "Server redirect refused. Check the configured server address.")) {
+      try validate(response, data: Data("dummy-secret-body".utf8))
+    }
   }
 
   // MARK: cancellation
@@ -444,25 +511,16 @@ struct RESTRedirectSecurityTests {
   @Test func cancelledPasswordLoginForwardsNothing() async throws {
     let (originURL, _) = try await startBoth()
     defer { stopBoth() }
-    // Origin A accepts the connection but never answers (no respondWith configured with
-    // an answerable status), so the request sits until the cancel lands.
-    originA.respondWith(status: 200, body: "", delayMs: 30_000)
-
+    originA.respondWith(status: 307, hold: true)
     let task = Task {
       try await liveClient().passwordLogin(originURL, "basic", "alice", "dummy-password")
     }
-    try await Task.sleep(nanoseconds: 500_000_000) // let it reach the wire
+    var arrivals = originA.admitted.stream.makeAsyncIterator()
+    _ = await arrivals.next()
+    #expect(originA.received.count == 1)
+    #expect(originA.received.first?.body.contains("dummy-password") == true)
     task.cancel()
-    try await Task.sleep(nanoseconds: 500_000_000) // give the cancel time to tear down
-    do {
-      _ = try await task.value
-      Issue.record("a cancelled login attempt must not succeed")
-    } catch is CancellationError {
-      // expected
-    } catch {
-      // The cancellation may surface as either CancellationError or the URLError wrapped
-      // into RESTError.unreachable depending on the timing of the teardown.
-    }
+    await #expect(throws: CancellationError.self) { try await task.value }
     assertImpostorSilent(originB)
   }
 }
