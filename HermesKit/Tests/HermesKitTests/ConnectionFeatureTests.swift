@@ -1041,15 +1041,13 @@ struct ConnectionFeatureTests {
   }
 
   /// The generation gate, exercised directly: a cancelled attempt can't send at all
-  /// (TCA drops sends from cancelled tasks), so the gate's real job is the attempt that
-  /// WASN'T cancelled — e.g. a response already in flight when the stale send ran. A
-  /// verdict from the old server must be inert, and the gate is the only defense when the
-  /// user retyped the SAME URL (the `parseServerURL == baseURL` guard lets it through).
+  /// (TCA drops sends from cancelled tasks), so the gate's real job is the verdict that
+  /// was ALREADY in flight when the URL changed — an old-server response arriving under
+  /// a new generation must be inert, publishing nothing.
   @Test func aStaleAttemptResponseCannotLandUnderANewGeneration() async {
-    let oldServer = URL(string: "http://old.example:9119")!
+    let clock = TestClock()
     let keychain = KeychainClient.inMemory()
     let preferences = PreferencesClient.inMemory()
-    let (gate, releaseSignIn) = AsyncStream<Void>.makeStream()
     // Retyping the SAME URL: the URL guard alone would let the stale OAuth verdict land.
     var state = oauthReadyState()
     state.serverURL = "http://old.example:9119"
@@ -1057,18 +1055,19 @@ struct ConnectionFeatureTests {
     let store = TestStore(initialState: state) {
       ConnectionFeature()
     } withDependencies: {
-      // The attempt completes NORMALLY (no cancellation) after the URL change and retype:
-      // its success verdict is in flight and generation-gated, not drop-on-cancel.
+      // The in-flight attempt stays parked while the user edits the field (the browser
+      // has not returned). A truly delayed, already-in-flight success verdict is fed
+      // DIRECTLY through the attemptResponse gate below — that is the exact scenario the
+      // gate exists for, since cancelling the effect would drop its own sends.
       $0.oauthLogin.signIn = { @Sendable _, _ in
-        for await _ in gate { break }
+        try await Task.sleep(for: .seconds(60))
         return bearerFixture()
       }
-      // The re-armed 600 ms debounce fires after the retyped URL; a server answers.
       $0.hermesREST.status = { @Sendable _ in okStatus() }
       $0.bearerTokens = BearerTokenStore()
       $0.keychain = keychain
       $0.preferences = preferences
-      $0.continuousClock = TestClock()
+      $0.continuousClock = clock
     }
 
     await store.send(.connectTapped) { $0.requestGeneration = 1; $0.status = .validating }
@@ -1086,19 +1085,27 @@ struct ConnectionFeatureTests {
       $0.serverURL = "http://old.example:9119"
       $0.status = .idle
     }
-    // The old attempt (generation 1) finally returns, credentials validated. Inert: the
-    // generation gate drops it before the reducer's success handler can touch anything.
-    releaseSignIn.yield()
-    await store.receive({ if case .attemptResponse(1, .oauthLoginResponse(.success)) = $0 { return true }; return false })
-    #expect(keychain.loadSession(.shared) == nil, "a stale verdict published old credentials")
-    #expect(preferences.loadServerURL() == nil, "a stale verdict connected the old server")
-    // The retyped URL then resolves through its own debounced check (generation 3).
+    // The parked sign-in's effect was cancelled by the URL change (defense layer 1, which
+    // drops its sends). The retyped URL then resolves through its own debounced check:
+    await clock.advance(by: .milliseconds(600))
     await store.receive(\.checkServer) { $0.requestGeneration = 4; $0.status = .checking }
     await store.receive({ if case .attemptResponse(4, .serverStatusResponse) = $0 { return true }; return false }) {
-      $0.capability = oauthCapability()
-      $0.method = .oauth
-      $0.status = .reachable(version: "0.17.0")
+      $0.capability = .tokenOnly
+      $0.method = .token
+      $0.serverVersion = "0.16.0"
+      $0.status = .reachable(version: "0.16.0")
     }
+    // Defense layer 2 — the gate, exercised directly AFTER the new generation has fully
+    // settled: a success verdict from the OLD attempt (generation 1) arrives under the
+    // new generation while the browser leg is (in reality) still open. The reducer must
+    // drop it wholesale BEFORE any success handler publishes, persists or connects.
+    let stale = ServerConnection(
+      baseURL: URL(string: "http://old.example:9119")!,
+      auth: .bearer(bearerFixture())
+    )
+    await store.send(.attemptResponse(1, .oauthLoginResponse(.success(stale))))
+    #expect(keychain.loadSession(.shared) == nil, "a stale verdict published old credentials")
+    #expect(preferences.loadServerURL() == nil, "a stale verdict connected the old server")
     await store.finish()
   }
 
