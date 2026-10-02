@@ -1,0 +1,207 @@
+# Personal-fork verification for the Hermes Mobile stabilization branch.
+#
+# Two REQUIRED lanes; a green run means both passed — no aggregate badge may hide
+# a skipped or omitted lane:
+#
+#   1. unit-and-build   — full HermesKit suite, unsigned app build. The single
+#                         genuinely environment-dependent test
+#                         (RESTTransportSuite/KeychainClientTests/liveKeychainRoundTripsBearerSession,
+#                         which needs an unlocked login keychain with a code-signed
+#                         or GUI-unlocked host and fails with errSecUserLoginRequired
+#                         -25308 in locked headless sessions — reproduced in the
+#                         clean-baseline logs, /tmp/hms-baseline-test.log) is skipped
+#                         HERE EXPLICITLY and solely, and must instead pass in lane 2.
+#                         No broad catch-and-pass, no silent skips.
+#   2. keychain-live-environment — the environment-dependent Keychain live test and the
+#                         full KeychainClientTests suite, in a lane labeled environment.
+#                         If the hosted runner's keychain cannot satisfy it, this lane
+#                         FAILS visibly and the run is red; it is never marked as
+#                         covered by lane 1.
+#
+# Discovery note (2026-10-02): hosted `macos-15` and `macos-26` images currently default
+# to Xcode 26.6 (actions/runner-images readme images/macos/*), which matches the Mac Air
+# local toolchain (Xcode 26.6 / Build 17F113). The workflow pins 26.6 explicitly and
+# prints `xcodebuild -version`; if hosted images rotate past 26.6 the pin step fails loud
+# rather than testing an unverified toolchain. The prior fork verification lane ran on
+# Xcode 26.3 (run 35250366395); 26.3 was dropped from the images, so 26.6 is the current
+# supported pin. Re-discover before each integration freeze (plan section 9 F1).
+
+name: Personal verification
+
+on:
+  push:
+    branches:
+      - personal/michael-stabilization
+    paths:
+      - "HermesKit/**"
+      - "HermesMobile/**"
+      - "HermesMobileTests/**"
+      - "Probe/**"
+      - "Project.swift"
+      - "Makefile"
+      - "Scripts/**"
+      - "scripts/**"
+      - "docs/**"
+      - ".github/workflows/personal-verification.yml"
+  pull_request:
+    branches:
+      - personal/michael-stabilization
+      - personal/michael
+
+# Cancel superseded runs on the same branch to keep fork CI costs proportionate.
+concurrency:
+  group: personal-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The one environment-dependent test (locked-keychain gate). Kept in one variable so
+  # lane 1's skip list and lane 2's filter can never drift apart.
+  KEYCHAIN_ENV_TEST: "liveKeychainRoundTripsBearerSession"
+
+jobs:
+  unit-and-build:
+    name: HermesKit suite + unsigned app build (hosted macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Record verification manifest
+        id: manifest
+        run: |
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+          } | tee verification-manifest.txt
+          sw_vers | tee -a verification-manifest.txt
+          uname -m | tee -a verification-manifest.txt
+
+      - name: Select Xcode 26.6 (fail loud if hosted image no longer provides it)
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version > xcode-version.txt
+          cat xcode-version.txt
+          swift --version | head -2 >> xcode-version.txt
+
+      - name: Install Tuist (pinned version)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/tuist/tuist/releases/download/4.206.0/tuist.zip -o /tmp/tuist.zip
+          mkdir -p /tmp/tuist
+          unzip -q /tmp/tuist.zip -d /tmp/tuist
+          chmod +x /tmp/tuist/tuist
+          /tmp/tuist/tuist version | tee tuist-version.txt
+
+      - name: Dependency resolution (clean checkout)
+        run: |
+          set -euo pipefail
+          /tmp/tuist/tuist install 2>&1 | tee tuist-install.log
+          echo "--- HermesKit/Package.resolved (dependency pins) ---"
+          tee hermeskit-package-resolved.txt < HermesKit/Package.resolved
+
+      - name: Generate Xcode workspace
+        run: /tmp/tuist/tuist generate --no-open 2>&1 | tee tuist-generate.log
+
+      - name: HermesKit full suite (explicit single skip = environment-dependent Keychain test)
+        run: |
+          swift test --package-path HermesKit --skip "$KEYCHAIN_ENV_TEST" 2>&1 | tee hermeskit-test.log
+          # `swift test` exit code is preserved through the pipe failure semantics of the shell
+          # (pipefail set via bash default in run steps); assert it explicitly so a failed run
+          # cannot be masked by tee succeeding.
+          test ${PIPESTATUS[0]:-0} -eq 0 || exit 1
+
+      - name: Summarize suite result (counts + the explicit skip)
+        if: always()
+        run: |
+          {
+            echo "## Lane 1: HermesKit suite"
+            echo "- Command: \`swift test --package-path HermesKit --skip $KEYCHAIN_ENV_TEST\`"
+            echo "- Explicit skip (environment-dependent, required in lane 2): \`$KEYCHAIN_ENV_TEST\`"
+            grep -E "Test run with .* (passed|failed)" hermeskit-test.log | tail -1 || true
+          } | tee suite-summary.txt
+
+      - name: Unsigned app build (iOS Simulator, generic destination)
+        run: |
+          xcodebuild build \
+            -workspace HermesMobile.xcworkspace \
+            -scheme HermesMobile \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee app-build.log
+          test ${PIPESTATUS[0]:-0} -eq 0 || exit 1
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-and-build-artifacts-${{ github.run_attempt }}
+          path: |
+            verification-manifest.txt
+            xcode-version.txt
+            tuist-version.txt
+            tuist-install.log
+            tuist-generate.log
+            hermeskit-package-resolved.txt
+            hermeskit-test.log
+            suite-summary.txt
+            app-build.log
+          if-no-files-found: error
+
+  keychain-live-environment:
+    name: Environment lane — live Keychain (hosted macOS, unlocked login keychain)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Select Xcode 26.6 (fail loud if hosted image no longer provides it)
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version | tee xcode-version.txt
+          swift --version | head -2 >> xcode-version.txt
+
+      - name: Dependency resolution (clean checkout)
+        run: |
+          set -euo pipefail
+          swift package resolve --package-path HermesKit 2>&1 | tee resolve.log
+
+      - name: Environment gate — KeychainClientTests (includes the live Keychain test)
+        run: |
+          swift test --package-path HermesKit --filter RESTTransportSuite/KeychainClientTests 2>&1 | tee keychain-suite.log
+          test ${PIPESTATUS[0]:-0} -eq 0 || exit 1
+
+      - name: Live Keychain test must actually appear in the run
+        if: always()
+        run: |
+          # Guard against the filter silently matching nothing: if the live test never ran,
+          # the environment lane is not green — it is incomplete and must fail.
+          grep -qE "(✔|✘) Test liveKeychainRoundTripsBearerSession" keychain-suite.log || {
+            echo "FATAL: liveKeychainRoundTripsBearerSession did not run in the environment lane. An omitted required lane must never be represented as green." >&2
+            exit 1
+          }
+          grep -qE "✔ Test liveKeychainRoundTripsBearerSession" keychain-suite.log || {
+            echo "FATAL: liveKeychainRoundTripsBearerSession did not pass. See keychain-suite.log (environment lane is red)." >&2
+            exit 1
+          }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keychain-environment-artifacts-${{ github.run_attempt }}
+          path: |
+            xcode-version.txt
+            resolve.log
+            keychain-suite.log
+          if-no-files-found: error
