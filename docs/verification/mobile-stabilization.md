@@ -35,22 +35,25 @@ candidate baseline (Mac log `/tmp/hms-baseline-test.log`, suite failure summary
 
 No broad catch-and-pass; no aggregate badge over an omitted lane.
 
-## Hosted runner / toolchain discovery (2026-10-02)
+## Hosted runner / toolchain discovery (2026-10-02, updated after run 36985304649)
 
 - Prior fork verification lanes ran on `macos-15` + Xcode 26.3 (run
-  35250366395 success); that image version has since been dropped.
-- Current `actions/runner-images` `macos-15` / `macos-26` readmes list Xcode
-  **26.6** as the default — matching the local Mac Air (`Xcode 26.6 / Build
-  17F113`). The workflow pins 26.6 with a fail-loud selection step; re-discover
-  before every integration freeze and re-pin only to a documented image.
+  35250366395 success); that pin was then rotated out and 26.6 was briefly
+  believed default, but the first Personal-verification run proved the live
+  image ships only up to Xcode **26.3** (Xcode_26.3.app is the newest
+  _26.x.app in /Applications; 26.6/26.4 are absent).
+- The workflow therefore pins **26.3** with a fail-loud selection step; the
+  local Mac Air keeps Xcode 26.6 / Build 17F113, so parity is "Xcode 26.x on
+  both hosts, exact versions recorded in each manifest". Re-discover before
+  every integration freeze and re-pin only to a documented image.
 
 ## Reproduce locally (clean checkout → dependencies → tests/build)
 
 From a fresh checkout of `netera-michael/hermes-mobile` on branch
-`personal/michael-stabilization`, on macOS with Xcode 26.6:
+`personal/michael-stabilization`, on macOS with Xcode 26.x:
 
 ```sh
-xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer   # or sudo
+xcode-select -s /Applications/Xcode_26.app/Contents/Developer   # or sudo;
 tuist install                     # dependency resolution (pinned Package.resolved)
 tuist generate --no-open          # regenerate workspace/project from Project.swift
 

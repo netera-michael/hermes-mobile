@@ -18,13 +18,14 @@
 #                         FAILS visibly and the run is red; it is never marked as
 #                         covered by lane 1.
 #
-# Discovery note (2026-10-02): hosted `macos-15` and `macos-26` images currently default
-# to Xcode 26.6 (actions/runner-images readme images/macos/*), which matches the Mac Air
-# local toolchain (Xcode 26.6 / Build 17F113). The workflow pins 26.6 explicitly and
-# prints `xcodebuild -version`; if hosted images rotate past 26.6 the pin step fails loud
-# rather than testing an unverified toolchain. The prior fork verification lane ran on
-# Xcode 26.3 (run 35250366395); 26.3 was dropped from the images, so 26.6 is the current
-# supported pin. Re-discover before each integration freeze (plan section 9 F1).
+# Discovery note (2026-10-02, updated after run 36985304649): hosted images no longer
+# ship Xcode 26.6; the newest available on macos-15 is Xcode 26.3 (reproduced in the
+# failed run's live `ls /Applications`). The workflow pins 26.3 explicitly and prints
+# `xcodebuild -version`; if hosted images rotate past 26.3 the pin step fails loud
+# rather than testing an unverified toolchain. The Mac Air local toolchain is Xcode
+# 26.6 / Build 17F113 — parity is Xcode-26.x across both, with the exact versions
+# recorded in the manifest and docs/verification/mobile-stabilization.md.
+# Re-discover before each integration freeze (plan section 9 F1).
 
 name: Personal verification
 
@@ -83,10 +84,10 @@ jobs:
           sw_vers | tee -a verification-manifest.txt
           uname -m | tee -a verification-manifest.txt
 
-      - name: Select Xcode 26.6 (fail loud if hosted image no longer provides it)
+      - name: Select Xcode 26.3 (fail loud if hosted image no longer provides it)
         run: |
           ls /Applications | grep -i xcode || true
-          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version > xcode-version.txt
           cat xcode-version.txt
           swift --version | head -2 >> xcode-version.txt
@@ -165,9 +166,9 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Select Xcode 26.6 (fail loud if hosted image no longer provides it)
+      - name: Select Xcode 26.3 (fail loud if hosted image no longer provides it)
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version | tee xcode-version.txt
           swift --version | head -2 >> xcode-version.txt
 
