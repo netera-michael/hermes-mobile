@@ -18,15 +18,29 @@ public struct SettingsFeature {
     public var log: [GatewayLogEntry]
     /// Safe, bounded trace only; never populated from the gateway debug log.
     public var connectionTrace: [ConnectionTraceEntry]
+    public var diagnosticsSettings = DiagnosticsSettingsFeature.State()
     /// Whether the connected agent exposes the `hermes-push` plugin (passed down from the
     /// session list's capability probe). When false the notifications UI (C6) shows a
     /// "not available on this server" note instead of the toggle.
     public var pushAvailable: Bool
-    /// The "Notify me about approvals" toggle, reflecting the OS authorization status:
-    /// `true` when notifications are authorized (or provisional), `false` otherwise. Read
-    /// on appearance from `PushClient.authorizationStatus()`; turning it ON triggers the
-    /// contextual permission prompt.
+    /// Account-scoped intent combined with OS authorization; explicit Off always wins.
+    /// Read OS status on appearance; turning On triggers the contextual permission prompt.
     public var notificationsEnabled: Bool
+    public var notificationGeneration = 0
+    public var notificationStatus: NotificationStatus = .idle
+    public enum NotificationStatus: Equatable, Sendable {
+      case idle, unregistering, off, unregisterFailed, removalTokenMissing, registrationFailed
+      public var message: String? {
+        switch self {
+        case .idle: nil
+        case .unregistering: "Turning off server notifications…"
+        case .off: "Notifications are off for this account on this server."
+        case .unregisterFailed: "Off on this device, but server removal could not be confirmed. Pushes may still arrive. Turn off notifications in iOS Settings to block delivery, or try Off again."
+        case .removalTokenMissing: "Off on this device, but server removal is unconfirmed. This app has no saved device token to retry removal. Ask the server administrator to remove this device registration. No automatic retry is scheduled."
+        case .registrationFailed: "Couldn't register for notifications. This build may lack push entitlements, or the server may be unavailable."
+        }
+      }
+    }
     /// `true` when notifications were denied at the OS level — the view shows guidance to
     /// enable them in iOS Settings (opening the URL is a thin view concern). Set when the
     /// authorization request is declined or status reads `.denied`.
@@ -50,6 +64,21 @@ public struct SettingsFeature {
     /// presented; new chat slots seed from the same keys, so a change here applies to
     /// every chat created afterwards. Open chats keep their own live values.
     public var displayPrefs: ChatDisplayPrefs
+    public var agentUpdateCheck: AgentUpdateCheck?
+    public var agentUpdateState: AgentUpdateState
+    public var agentUpdateActionID: String?
+    public var agentUpdateChecking: Bool
+    @Presents public var confirmationDialog: ConfirmationDialogState<DialogAction>?
+
+    public enum AgentUpdateState: Equatable, Sendable {
+      case checking, ready, checkingFailed(String), unsupported
+      case starting, running, externalRunning, succeeded(String?), failed(String), uncertain
+
+      public var isCheckFailure: Bool {
+        if case .checkingFailed = self { return true }
+        return false
+      }
+    }
 
     /// The outcome of a "send test notification" attempt, surfaced in the view/snapshots.
     public enum TestPushStatus: Equatable, Sendable {
@@ -81,7 +110,9 @@ public struct SettingsFeature {
       pluginUpdate: PluginUpdateStatus = .idle,
       defaultSwipeAction: SessionSwipeAction = .default,
       deleteSupported: Bool = true,
-      displayPrefs: ChatDisplayPrefs = ChatDisplayPrefs()
+      displayPrefs: ChatDisplayPrefs = ChatDisplayPrefs(),
+      agentUpdateCheck: AgentUpdateCheck? = nil,
+      agentUpdateState: AgentUpdateState = .checking
     ) {
       self.connection = connection
       self.token = connection.token ?? ""
@@ -97,6 +128,10 @@ public struct SettingsFeature {
       self.defaultSwipeAction = defaultSwipeAction
       self.deleteSupported = deleteSupported
       self.displayPrefs = displayPrefs
+      self.agentUpdateCheck = agentUpdateCheck
+      self.agentUpdateState = agentUpdateState
+      self.agentUpdateActionID = nil
+      self.agentUpdateChecking = false
     }
 
     /// The installed plugin is behind `PushSetup.minimumPluginVersion` AND the agent can pull
@@ -126,25 +161,45 @@ public struct SettingsFeature {
     }
   }
 
+  public enum DialogAction: Equatable, Sendable {
+    case startAgentUpdateConfirmed
+  }
+
   public enum Action: BindableAction {
     case binding(BindingAction<State>)
     case task
+    case settingsDisappeared
+    case updateCheckTapped
+    case agentUpdateChecked(Result<AgentUpdateCheck, RESTError>)
+    case startAgentUpdateTapped
+    case startAgentUpdateConfirmed
+    case confirmationDialog(PresentationAction<DialogAction>)
+    case agentUpdateStarted(Result<String, RESTError>)
+    case agentUpdatePolled(Result<AgentUpdateActionStatus, RESTError>)
+    case agentUpdateObservationExpired
+    case agentUpdateResumed(AgentUpdateActionStatus?)
+    case agentUpdateRechecked(Result<AgentUpdateActionStatus, RESTError>)
     case logUpdated([GatewayLogEntry])
     case copyConnectionTraceTapped
+    case diagnosticsSettings(DiagnosticsSettingsFeature.Action)
     case saveTokenTapped
     case clearTokenTapped
     case reconnectTapped
     case doneTapped
     /// The current OS authorization status, read on appearance (drives the toggle).
     case authorizationStatusLoaded(PushAuthorizationStatus)
+    case notificationStatusLoaded(Int, PushAuthorizationStatus)
     /// User flipped the "Notify me about approvals" toggle.
     case notificationsToggled(Bool)
     /// Result of the contextual permission prompt (`true` ⇒ granted).
     case authorizationResult(Bool)
+    case notificationAuthorizationResult(Int, Bool)
+    case notificationOperationResult(Int, State.NotificationStatus)
     /// User tapped "Send test notification".
     case sendTestPushTapped
     /// Result of the test-push request.
     case testPushResult(Bool)
+    case notificationTestResult(Int, Bool)
     /// The push guide's "Ask agent to install" button — dismiss Settings and bubble up so the
     /// app opens a new chat with the install prompt pre-filled.
     case askAgentToInstallTapped
@@ -188,7 +243,7 @@ public struct SettingsFeature {
     }
   }
 
-  private enum CancelID { case logStream }
+  private enum CancelID { case logStream, updatePoll }
 
   @Dependency(\.keychain) var keychain
   @Dependency(\.preferences) var preferences
@@ -206,6 +261,7 @@ public struct SettingsFeature {
 
   public var body: some ReducerOf<Self> {
     BindingReducer()
+    Scope(state: \.diagnosticsSettings, action: \.diagnosticsSettings) { DiagnosticsSettingsFeature() }
     Reduce { state, action in
       switch action {
       case .task:
@@ -218,21 +274,178 @@ public struct SettingsFeature {
           }
           .cancellable(id: CancelID.logStream, cancelInFlight: true),
           // Reflect the real OS authorization status in the toggle on appearance.
-          .run { [push] send in
-            await send(.authorizationStatusLoaded(push.authorizationStatus()))
+          .run { [push, generation = state.notificationGeneration] send in
+            await send(.notificationStatusLoaded(generation, push.authorizationStatus()))
           },
           // Read the installed plugin's version so we can offer an update. Never throws —
           // an unreachable/old agent maps to `.unknown`, which offers nothing.
           .run { [rest, connection = state.connection] send in
             await send(.pushPluginInfoLoaded(rest.pushPluginInfo(connection)))
+          },
+          .send(.updateCheckTapped),
+          .run { [rest, connection = state.connection] send in
+            // Recover an in-flight server update after Settings is reopened. No POST replay.
+            let status = try? await rest.agentUpdateStatus(connection)
+            await send(.agentUpdateResumed(status?.running == true ? status : nil))
           }
         )
+
+      case .settingsDisappeared:
+        if state.agentUpdateState == .running { state.agentUpdateState = .uncertain }
+        return .cancel(id: CancelID.updatePoll)
+
+      case .updateCheckTapped:
+        guard state.agentUpdateActionID == nil, !state.agentUpdateChecking,
+              state.agentUpdateState != .starting else { return .none }
+        if state.agentUpdateState == .externalRunning {
+          return .run { [rest, connection = state.connection] send in
+            do { await send(.agentUpdateRechecked(.success(try await rest.agentUpdateStatus(connection)))) }
+            catch { await send(.agentUpdateRechecked(.failure(asRESTError(error)))) }
+          }
+        }
+        state.confirmationDialog = nil
+        state.agentUpdateChecking = true
+        state.agentUpdateState = .checking
+        return .run { [rest, connection = state.connection] send in
+          do {
+            await send(.agentUpdateChecked(.success(try await rest.checkAgentUpdate(connection))))
+          } catch {
+            await send(.agentUpdateChecked(.failure(asRESTError(error))))
+          }
+        }
+
+      case let .agentUpdateChecked(result):
+        state.agentUpdateChecking = false
+        if state.agentUpdateState == .externalRunning { return .none }
+        switch result {
+        case let .success(check):
+          state.agentUpdateCheck = check
+          state.agentUpdateState = .ready
+        case let .failure(error):
+          state.agentUpdateState = error.isMissingEndpointVerdict
+            ? .unsupported : .checkingFailed(error.message)
+        }
+        return .none
+
+      case .startAgentUpdateTapped:
+        guard state.agentUpdateState == .ready,
+              state.agentUpdateCheck?.canApply == true,
+              state.agentUpdateCheck?.updateAvailable == true else { return .none }
+        state.confirmationDialog = ConfirmationDialogState {
+          TextState("Update Hermes agent?")
+        } actions: {
+          ButtonState(role: .destructive, action: .startAgentUpdateConfirmed) {
+            TextState("Update Hermes")
+          }
+          ButtonState(role: .cancel) { TextState("Cancel") }
+        } message: {
+          TextState("This updates the server and may restart the gateway and dashboard, interrupting active sessions. Start only when nobody is using Hermes.")
+        }
+        return .none
+
+      case .confirmationDialog(.dismiss):
+        return .none
+
+      case .startAgentUpdateConfirmed, .confirmationDialog(.presented(.startAgentUpdateConfirmed)):
+        guard state.confirmationDialog != nil,
+              state.agentUpdateState == .ready,
+              state.agentUpdateCheck?.canApply == true,
+              state.agentUpdateCheck?.updateAvailable == true else { return .none }
+        state.confirmationDialog = nil
+        state.agentUpdateState = .starting
+        return .run { [rest, connection = state.connection] send in
+          do {
+            await send(.agentUpdateStarted(.success(try await rest.startAgentUpdate(connection))))
+          } catch {
+            await send(.agentUpdateStarted(.failure(asRESTError(error))))
+          }
+        }
+
+      case let .agentUpdateStarted(result):
+        switch result {
+        case let .failure(error):
+          // An offline/timeout after POST is ambiguous: never offer an automatic retry.
+          state.agentUpdateState = error == .unreachable || error == .offline
+            ? .uncertain : .failed(error.message)
+          return .none
+        case let .success(id):
+          state.agentUpdateActionID = id
+          state.agentUpdateState = .running
+          return .run { [rest, connection = state.connection, clock] send in
+            // Bounded observation; the server update keeps running if Settings closes.
+            for _ in 0..<360 {
+              if Task.isCancelled { return }
+              do {
+                let status = try await rest.agentUpdateStatus(connection)
+                await send(.agentUpdatePolled(.success(status)))
+                if !status.running && status.actionID == id && status.receipt?.finishedAt != nil { return }
+              } catch {
+                await send(.agentUpdatePolled(.failure(asRESTError(error))))
+              }
+              do { try await clock.sleep(for: .seconds(5)) } catch { return }
+            }
+            await send(.agentUpdateObservationExpired)
+          }
+          .cancellable(id: CancelID.updatePoll, cancelInFlight: true)
+        }
+
+      case let .agentUpdatePolled(result):
+        guard let id = state.agentUpdateActionID, state.agentUpdateState == .running else { return .none }
+        switch result {
+        case .failure:
+          // A restart can briefly cut the connection. Keep trying while Settings is open.
+          return .none
+        case let .success(status):
+          if status.running { return .none }
+          // The status endpoint may expose the PREVIOUS run's receipt or an uncorrelated
+          // exit code; neither proves that the action we started finished successfully.
+          guard status.actionID == id, let receipt = status.receipt,
+                receipt.finishedAt != nil else { return .none }
+          switch receipt.outcome {
+          case "success": state.agentUpdateState = .succeeded(receipt.postVersion)
+          case "partial", "failed", "refused":
+            state.agentUpdateState = .failed("The update did not complete cleanly. Check the server update log.")
+          default: state.agentUpdateState = .uncertain
+          }
+          return .cancel(id: CancelID.updatePoll)
+        }
+
+      case let .agentUpdateResumed(status):
+        guard let status, status.running else { return .none }
+        // An update from another client may own the host. Do not present a second start.
+        // Its eventual result is unowned by this phone, so never label it a success.
+        state.agentUpdateState = .externalRunning
+        return .none
+
+      case let .agentUpdateRechecked(result):
+        guard state.agentUpdateState == .externalRunning else { return .none }
+        switch result {
+        case let .success(status) where !status.running:
+          state.agentUpdateState = .ready
+          return .send(.updateCheckTapped)
+        case let .failure(error):
+          state.agentUpdateState = .checkingFailed(error.message)
+        default: break
+        }
+        return .none
+
+      case .agentUpdateObservationExpired:
+        if state.agentUpdateState == .running { state.agentUpdateState = .uncertain }
+        return .none
 
       case let .pushPluginInfoLoaded(info):
         state.pushPlugin = info
         return .none
 
+      case .diagnosticsSettings(.consentChanged(false)):
+        state.connectionTrace = []
+        return .none
+
+      case .diagnosticsSettings:
+        return .none
+
       case .copyConnectionTraceTapped:
+        // Legacy action retained for compatibility; UI uses reviewed preview below.
         // Snapshot at tap time so events added while Settings was open are included.
         let entries = connectionTrace.snapshot()
         state.connectionTrace = entries
@@ -264,7 +477,19 @@ public struct SettingsFeature {
         }
         return .none
 
-      case let .authorizationStatusLoaded(status):
+      case let .authorizationStatusLoaded(status), let .notificationStatusLoaded(_, status):
+        if case let .notificationStatusLoaded(generation, _) = action,
+           generation != state.notificationGeneration { return .none }
+        guard preferences.loadNotificationsEnabled(state.connection.notificationPreferenceScope) != false else {
+          state.notificationsEnabled = false
+          state.notificationsDenied = false
+          if state.notificationStatus != .unregistering {
+            let removal = preferences.loadNotificationRemoval(state.connection.notificationPreferenceScope)
+            state.notificationStatus = removal?.confirmed == true ? .off
+              : ((removal?.token ?? preferences.loadPushDeviceToken()) == nil ? .removalTokenMissing : .unregisterFailed)
+          }
+          return .none
+        }
         switch status {
         case .authorized, .provisional:
           state.notificationsEnabled = true
@@ -279,29 +504,70 @@ public struct SettingsFeature {
         return .none
 
       case let .notificationsToggled(isOn):
+        let scope = state.connection.notificationPreferenceScope
+        // Persist intent synchronously, before permission, token, or network work.
+        preferences.saveNotificationsEnabled(scope, isOn)
+        state.notificationGeneration &+= 1
+        let generation = state.notificationGeneration
+        state.notificationsEnabled = isOn
+        state.notificationsDenied = false
+        state.testPushStatus = .idle
+        state.notificationStatus = isOn ? .idle : .unregistering
         guard isOn else {
-          // Turning OFF in-app can't revoke OS permission (only iOS Settings can); just
-          // reflect the user's intent on the toggle.
-          state.notificationsEnabled = false
-          return .none
+          let removal = preferences.loadNotificationRemoval(scope)
+          let tokens = removal?.tokens ?? preferences.loadPushDeviceToken().map { [$0] } ?? []
+          return .run { [preferences, rest, connection = state.connection] send in
+            await preferences.notificationOperation(scope) {
+              guard preferences.loadNotificationsEnabled(scope) == false,
+                    preferences.loadNotificationRemoval(scope)?.operation == removal?.operation else { return }
+              guard !tokens.isEmpty else {
+                await send(.notificationOperationResult(generation, .removalTokenMissing))
+                return
+              }
+              var failed = false
+              for token in tokens {
+                guard !Task.isCancelled,
+                      preferences.loadNotificationsEnabled(scope) == false,
+                      preferences.loadNotificationRemoval(scope)?.operation == removal?.operation else { return }
+                do { try await rest.unregisterPush(connection, token) }
+                catch { failed = true }
+              }
+              guard !Task.isCancelled else { return }
+              if failed {
+                // Keep the complete set for an idempotent retry after partial success.
+                await send(.notificationOperationResult(generation, .unregisterFailed))
+              } else {
+                guard let removal, preferences.confirmNotificationRemoval(scope, removal.operation) else { return }
+                await send(.notificationOperationResult(generation, .off))
+              }
+            }
+          }
         }
-        // Turning ON: trigger the contextual permission prompt. The result decides whether
-        // the toggle stays on (granted → register) or flips back with denial guidance.
         return .run { [push] send in
-          await send(.authorizationResult(push.requestAuthorization()))
+          await send(.notificationAuthorizationResult(generation, push.requestAuthorization()))
         }
 
-      case let .authorizationResult(granted):
+      case let .notificationOperationResult(generation, status):
+        guard generation == state.notificationGeneration else { return .none }
+        state.notificationStatus = status
+        return .none
+
+      case let .authorizationResult(granted), let .notificationAuthorizationResult(_, granted):
+        if case let .notificationAuthorizationResult(generation, _) = action,
+           generation != state.notificationGeneration { return .none }
+        guard preferences.loadNotificationsEnabled(state.connection.notificationPreferenceScope) != false else {
+          return .none
+        }
         if granted {
           state.notificationsEnabled = true
           state.notificationsDenied = false
-          // Granted → ensure this device is registered (reuse the C4 register path: obtain a
-          // device token within a bounded wait, then register it). Best-effort.
-          return .run { [rest, push, preferences, clock, connection = state.connection] _ in
-            _ = await ensurePushRegistered(
+          return .run { [rest, push, preferences, clock, connection = state.connection,
+                        generation = state.notificationGeneration] send in
+            let ok = await ensurePushRegistered(
               rest: rest, push: push, preferences: preferences,
               connection: connection, clock: clock
             )
+            await send(.notificationOperationResult(generation, ok ? .idle : .registrationFailed))
           }
         } else {
           state.notificationsEnabled = false
@@ -310,27 +576,32 @@ public struct SettingsFeature {
         }
 
       case .sendTestPushTapped:
+        guard state.pushAvailable,
+              preferences.loadNotificationsEnabled(state.connection.notificationPreferenceScope) != false else { return .none }
         state.testPushStatus = .sending
         // Register if needed, then ask the plugin to deliver a sample push. The token wait is
         // bounded inside `ensurePushRegistered` — if no token is ever obtained we fail fast
         // rather than leaving `testPushStatus` stuck on `.sending`.
-        return .run { [rest, push, preferences, clock, connection = state.connection] send in
+        return .run { [rest, push, preferences, clock, connection = state.connection,
+                      generation = state.notificationGeneration] send in
           guard await ensurePushRegistered(
             rest: rest, push: push, preferences: preferences,
             connection: connection, clock: clock
           ) else {
-            await send(.testPushResult(false))
+            await send(.notificationTestResult(generation, false))
             return
           }
           do {
             try await rest.sendTestPush(connection)
-            await send(.testPushResult(true))
+            await send(.notificationTestResult(generation, true))
           } catch {
-            await send(.testPushResult(false))
+            await send(.notificationTestResult(generation, false))
           }
         }
 
-      case let .testPushResult(ok):
+      case let .testPushResult(ok), let .notificationTestResult(_, ok):
+        if case let .notificationTestResult(generation, _) = action,
+           generation != state.notificationGeneration { return .none }
         state.testPushStatus = ok ? .sent : .failed
         return .none
 
@@ -388,25 +659,11 @@ public struct SettingsFeature {
         return .send(.delegate(.tokenSaved(token)))
 
       case .clearTokenTapped:
-        // Clear the full session (token + any gated cookies in the shared jar), not just the
-        // token — a gated logout must leave no cookie behind. In the bearer regime the token
-        // store has to stop writing BEFORE the entry goes (see `detachPersistence`); the
-        // server-side half of this logout is `AppFeature.serverSideLogout`, reached through
-        // the `.disconnect` delegate below.
-        bearerTokens.detachPersistence()
-        try? keychain.deleteSession()
-        preferences.clearServerURL()
-        preferences.savePinnedIDs([]) // pins are per-server; drop them on logout
-        preferences.saveSeenCounts([:]) // unread state is per-server; drop it too
-        preferences.saveGroupingMode(.default) // reset the list grouping pref on logout
-        preferences.saveDefaultSessionSwipeAction(.default) // reset the swipe-action pref too
-        preferences.saveShowCronSection(true) // reset the cron-section visibility pref too
-        preferences.clearSelectedProfileID() // selected profile is per-server — clear on logout
-        chatSnapshot.wipeAll() // snapshots + turn anchors are per-server — wipe on logout
-        return .merge(
-          .send(.delegate(.disconnect)),
-          .run { [dismiss] _ in await dismiss() }
-        )
+        // AppFeature handles this SAME action after the child reduction, capturing
+        // cleanup before revocation. Do not enqueue a second logout/dismiss callback:
+        // either could arrive after a replacement login.
+        state.notificationGeneration &+= 1
+        return .none
 
       case .reconnectTapped:
         return .merge(
@@ -421,6 +678,7 @@ public struct SettingsFeature {
         return .none
       }
     }
+    .ifLet(\.$confirmationDialog, action: \.confirmationDialog)
   }
 }
 
@@ -446,6 +704,8 @@ private func ensurePushRegistered(
   connection: ServerConnection,
   clock: any Clock<Duration>
 ) async -> Bool {
+  let scope = connection.notificationPreferenceScope
+  guard !Task.isCancelled, preferences.loadNotificationsEnabled(scope) != false else { return false }
   // Race the live token stream against a timeout; fall back to the persisted token.
   let token: String? = await withTaskGroup(of: String?.self) { group in
     group.addTask {
@@ -462,11 +722,14 @@ private func ensurePushRegistered(
   } ?? preferences.loadPushDeviceToken()
 
   guard let token else { return false }
-  preferences.savePushDeviceToken(token)
-  do {
-    try await rest.registerPush(connection, token, PushClient.apnsEnv, push.appVersion())
-    return true
-  } catch {
-    return false
+  let registered = LockIsolated(false)
+  await preferences.notificationOperation(scope) {
+    guard !Task.isCancelled, preferences.loadNotificationsEnabled(scope) != false else { return }
+    preferences.savePushDeviceToken(token)
+    do {
+      try await rest.registerPush(connection, token, PushClient.apnsEnv, push.appVersion())
+      registered.setValue(preferences.loadNotificationsEnabled(scope) != false)
+    } catch { }
   }
+  return registered.value
 }

@@ -5,7 +5,10 @@ import Testing
 
 // Serialized: several cases touch the process-global `HTTPCookieStorage.shared`, and
 // `deleteSession` now flushes it — running them concurrently would let one test wipe
-// another's cookies.
+// another's cookies. Nested in `RESTTransportSuite` because the live client also drives
+// `CookieSessionStore.shared` (bearer save clears it), which the cookie REST/WS ticket
+// suites lease from; running alongside them clears their store mid-request.
+extension RESTTransportSuite {
 @Suite(.serialized) struct KeychainClientTests {
   // MARK: Token-mode (byte-identical to before)
 
@@ -201,3 +204,4 @@ import Testing
     #expect(kc.loadToken() == nil)
   }
 }
+} // extension RESTTransportSuite

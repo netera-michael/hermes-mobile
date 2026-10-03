@@ -31,6 +31,34 @@ Push notifications span THREE artifacts but only the iOS app lives in this repo:
   foreground-suppression) — and `PushBridge` itself (Foundation-only: `NSLock` + `AsyncStream`)
   — outside the guard so the stream/buffer behavior is macOS-tested.
 
+## Persisted intent and remote removal
+
+`notificationPreferenceScope` is the normalized origin plus stable account identity, never
+rotating credentials. Cookie and bearer identities are separate; legacy token mode is
+server-scoped because it has no stable account identifier. Absent preference preserves
+legacy behavior; explicit Off wins over OS authorization, token events and registration.
+
+Off synchronously persists false and a new removal operation before network work. Removal
+uncertainty/confirmation is persisted under the same scope. Missing/corrupt removal state
+for explicit Off means unconfirmed, never success. Retain only the device routing tokens
+needed to retry: a deduplicated scoped list of every unresolved target (a token change adds
+the new token, never replaces an unresolved one); it survives logout clearing the global
+token. Retry unregisters every retained target; only success for all of them confirms
+removal and drops the list. Partial failure keeps the full list for idempotent retry. Identity cleanup never erases intent or unresolved removal.
+
+Settings restores warning/retry after recreation, relaunch and same-account return. A
+matching authenticated unregister success alone confirms removal; a stale completion cannot
+confirm a newer Off or On intent. Per-scope FIFO registration/unregistration and intent checks
+at admission prevent an older register from landing after Off's unregister. Logout cleanup
+is a separate five-second, single-use old-origin capability (see `oauth-sign-in.md`); its
+best-effort result does not mark pending Settings removal confirmed.
+
+Unconfirmed Off may still receive pushes. Retry is manual while signed into the same scope;
+there is no automatic online retry promise. Without any saved device token, show the honest
+missing-token warning and direct the user to server-side removal, not an impossible retry.
+Personal signing without push entitlements cannot receive remote push; iOS permission alone
+cannot enable it. Off does not direct the user to re-enable notifications.
+
 ## No shared secret on the device or in the plugin
 
 **The app does NOT sign pushes, and the plugin holds NO shared secret** — the gateway is the

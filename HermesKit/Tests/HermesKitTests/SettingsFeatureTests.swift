@@ -17,17 +17,23 @@ struct SettingsFeatureTests {
     preferences.saveGroupingMode(.chronological)
     preferences.saveDefaultSessionSwipeAction(.delete)
     preferences.saveSelectedProfileID("staging")
-    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
-      SettingsFeature()
+    let store = TestStore(initialState: AppFeature.State(home: {
+      var home = SessionListFeature.State(connection: connection)
+      home.settings = SettingsFeature.State(connection: connection)
+      return home
+    }())) {
+      AppFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       // Logout deletes the full session (token + any gated cookies), not just the token.
       $0.keychain.deleteSession = { @Sendable in deleted.setValue(true) }
       $0.preferences = preferences
       $0.dismiss = DismissEffect {}
     }
 
-    await store.send(.clearTokenTapped)
-    await store.receive(\.delegate.disconnect)
+    store.exhaustivity = .off
+    await store.send(.home(.settings(.presented(.clearTokenTapped))))
+    await store.finish()
     #expect(deleted.value)
     #expect(preferences.loadServerURL() == nil) // logout forgets the server URL too
     #expect(preferences.loadPinnedIDs() == []) // pins are per-server — cleared on logout
@@ -49,17 +55,23 @@ struct SettingsFeatureTests {
     #expect(chatSnapshot.loadSnapshot("s1") != nil)
     #expect(chatSnapshot.turnAnchor("s1") == now)
 
-    let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
-      SettingsFeature()
+    let store = TestStore(initialState: AppFeature.State(home: {
+      var home = SessionListFeature.State(connection: connection)
+      home.settings = SettingsFeature.State(connection: connection)
+      return home
+    }())) {
+      AppFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.keychain.deleteToken = { @Sendable in }
       $0.preferences = PreferencesClient.inMemory()
       $0.chatSnapshot = chatSnapshot
       $0.dismiss = DismissEffect {}
     }
 
-    await store.send(.clearTokenTapped)
-    await store.receive(\.delegate.disconnect)
+    store.exhaustivity = .off
+    await store.send(.home(.settings(.presented(.clearTokenTapped))))
+    await store.finish()
     // The snapshot store is empty after logout.
     #expect(chatSnapshot.loadSnapshot("s1") == nil)
     #expect(chatSnapshot.turnAnchor("s1") == nil)
@@ -67,12 +79,15 @@ struct SettingsFeatureTests {
 
   @Test func copyConnectionTraceExcludesGatewayDebugPayloads() async {
     let trace = ConnectionTraceClient.ringBuffer()
+    trace.setConnection(ServerConnection(baseURL: URL(string: "https://test.invalid")!, token: "test"))
+    trace.setConsent(true)
     trace.append(.init(timestamp: Date(timeIntervalSince1970: 0), generation: 1,
                        kind: .socketClosed))
     let copied = LockIsolated<String?>(nil)
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.connectionTrace = trace
       $0.pasteboard.copy = { @Sendable text in copied.setValue(text) }
     }
@@ -90,6 +105,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.dismiss = DismissEffect {}
     }
 
@@ -102,6 +118,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.keychain.saveToken = { @Sendable token in saved.setValue(token) }
     }
 
@@ -135,6 +152,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.debugLog.stream = { @Sendable in
         AsyncStream { continuation in
           continuation.yield(entries)
@@ -163,6 +181,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.debugLog.stream = { @Sendable in AsyncStream { $0.finish() } }
       $0.push = push.client
       $0.hermesREST.pushPluginInfo = { @Sendable _ in PushPluginInfo(status: .unknown) }
@@ -170,7 +189,7 @@ struct SettingsFeatureTests {
     store.exhaustivity = .off(showSkippedAssertions: false)
 
     await store.send(.task)
-    await store.receive(\.authorizationStatusLoaded) {
+    await store.receive(\.notificationStatusLoaded) {
       $0.notificationsEnabled = true
       $0.notificationsDenied = false
     }
@@ -183,6 +202,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
       $0.preferences = .inMemory()
       // A non-advancing TestClock: the token arrives first, so the timeout never fires.
@@ -192,13 +212,14 @@ struct SettingsFeatureTests {
       }
     }
 
-    await store.send(.notificationsToggled(true))
+    await store.send(.notificationsToggled(true)) {
+      $0.notificationsEnabled = true
+      $0.notificationGeneration = 1
+    }
     // The register effect subscribes to the token stream; drive a token in.
     push.emit(token: "tok-1")
-    await store.receive(\.authorizationResult) {
-      $0.notificationsEnabled = true
-      $0.notificationsDenied = false
-    }
+    await store.receive(\.notificationAuthorizationResult)
+    await store.receive(\.notificationOperationResult)
     #expect(registered.value == ["tok-1"])
   }
 
@@ -207,23 +228,32 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
     }
 
-    await store.send(.notificationsToggled(true))
-    await store.receive(\.authorizationResult) {
+    await store.send(.notificationsToggled(true)) {
+      $0.notificationsEnabled = true
+      $0.notificationGeneration = 1
+    }
+    await store.receive(\.notificationAuthorizationResult) {
       $0.notificationsEnabled = false
       $0.notificationsDenied = true
     }
   }
 
-  @Test func toggleOffJustReflectsIntent() async {
+  @Test func toggleOffPersistsIntentAndReportsUnknownRemoteRemoval() async {
+    let preferences = PreferencesClient.inMemory()
     let store = TestStore(
       initialState: SettingsFeature.State(connection: connection, notificationsEnabled: true)
-    ) { SettingsFeature() }
+    ) { SettingsFeature() } withDependencies: { $0.preferences = preferences }
     await store.send(.notificationsToggled(false)) {
       $0.notificationsEnabled = false
+      $0.notificationGeneration = 1
+      $0.notificationStatus = .unregistering
     }
+    #expect(preferences.loadNotificationsEnabled(connection.notificationPreferenceScope) == false)
+    await store.receive(\.notificationOperationResult) { $0.notificationStatus = .removalTokenMissing }
   }
 
   @Test func sendTestPushTransitionsToSent() async {
@@ -232,6 +262,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
       $0.preferences = .inMemory()
       $0.continuousClock = TestClock()
@@ -244,7 +275,7 @@ struct SettingsFeatureTests {
     }
     // The register step subscribes to the token stream first.
     push.emit(token: "tok-1")
-    await store.receive(\.testPushResult) {
+    await store.receive(\.notificationTestResult) {
       $0.testPushStatus = .sent
     }
     #expect(sent.value)
@@ -255,6 +286,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
       $0.preferences = .inMemory()
       $0.continuousClock = TestClock()
@@ -266,7 +298,7 @@ struct SettingsFeatureTests {
       $0.testPushStatus = .sending
     }
     push.emit(token: "tok-1")
-    await store.receive(\.testPushResult) {
+    await store.receive(\.notificationTestResult) {
       $0.testPushStatus = .failed
     }
   }
@@ -280,6 +312,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
       $0.preferences = .inMemory() // no persisted token to fall back to
       $0.continuousClock = clock
@@ -292,7 +325,7 @@ struct SettingsFeatureTests {
     }
     // Advance past the bounded wait → the timeout wins, no token, registration fails.
     await clock.advance(by: .seconds(5))
-    await store.receive(\.testPushResult) {
+    await store.receive(\.notificationTestResult) {
       $0.testPushStatus = .failed
     }
     #expect(sent.value == false) // never reached the test-send
@@ -309,6 +342,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.push = push.client
       $0.preferences = prefs
       $0.continuousClock = clock
@@ -320,7 +354,7 @@ struct SettingsFeatureTests {
       $0.testPushStatus = .sending
     }
     await clock.advance(by: .seconds(5))
-    await store.receive(\.testPushResult) {
+    await store.receive(\.notificationTestResult) {
       $0.testPushStatus = .sent
     }
     #expect(registeredToken.value == "persisted-tok")
@@ -334,6 +368,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginInfo = { @Sendable _ in
         PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: true)
       }
@@ -354,6 +389,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.pushPluginInfo = { @Sendable _ in
         PushPluginInfo(status: .ready, version: "0.1.0", canUpdateGit: false)
       }
@@ -377,6 +413,7 @@ struct SettingsFeatureTests {
       let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
         SettingsFeature()
       } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
         $0.hermesREST.pushPluginInfo = { @Sendable _ in info }
       }
       store.exhaustivity = .off
@@ -401,6 +438,7 @@ struct SettingsFeatureTests {
     ) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.updatePushPlugin = { @Sendable _ in
         called.setValue(true)
         return PushPluginUpdateResult(unchanged: false)
@@ -425,6 +463,7 @@ struct SettingsFeatureTests {
     ) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.updatePushPlugin = { @Sendable _ in PushPluginUpdateResult(unchanged: true) }
     }
 
@@ -443,6 +482,7 @@ struct SettingsFeatureTests {
     ) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.updatePushPlugin = { @Sendable _ in
         throw RESTError.server(status: 400, detail: detail)
       }
@@ -463,6 +503,7 @@ struct SettingsFeatureTests {
     ) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.updatePushPlugin = { @Sendable _ in throw Boom() }
     }
 
@@ -484,6 +525,7 @@ struct SettingsFeatureTests {
     ) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.hermesREST.updatePushPlugin = { @Sendable _ in
         calls.withValue { $0 += 1 }
         return PushPluginUpdateResult(unchanged: false)
@@ -503,6 +545,7 @@ struct SettingsFeatureTests {
     let store = TestStore(initialState: SettingsFeature.State(connection: connection)) {
       SettingsFeature()
     } withDependencies: {
+      $0.hermesREST.agentUpdateStatus = { _ in throw RESTError.notFound }
       $0.preferences = preferences
     }
 

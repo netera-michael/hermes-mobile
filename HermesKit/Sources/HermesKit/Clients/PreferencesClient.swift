@@ -1,6 +1,73 @@
 import ComposableArchitecture
 import DependenciesMacros
 import Foundation
+import CryptoKit
+
+/// Stable origin + account identity, never a rotating credential. Legacy token auth has
+/// no account identifier, so its preference is deliberately server-scoped.
+public extension ServerConnection {
+  var notificationPreferenceScope: String {
+    var origin = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+    origin.scheme = origin.scheme?.lowercased()
+    origin.host = origin.host?.lowercased()
+    if (origin.scheme == "https" && origin.port == 443)
+      || (origin.scheme == "http" && origin.port == 80) { origin.port = nil }
+    origin.user = nil; origin.password = nil; origin.path = ""
+    origin.query = nil; origin.fragment = nil
+    let identity: [String]
+    switch auth {
+    case .token: identity = ["token"]
+    case let .cookie(session): identity = ["cookie", session.provider, session.username]
+    case let .bearer(session): identity = ["bearer", session.provider, session.userID]
+    }
+    let parts = [origin.string ?? ""] + identity
+    let encoded = parts.map { "\($0.utf8.count):\($0)" }.joined()
+    return SHA256.hash(data: Data(encoded.utf8)).map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+/// Persisted reconciliation for one account/origin. The token is a routing address, not auth.
+public struct NotificationRemoval: Codable, Equatable, Sendable {
+  public var operation: UUID
+  public var tokens: [String]
+  public var confirmed: Bool
+  /// Compatibility view for callers displaying whether a retry target exists.
+  public var token: String? {
+    get { tokens.first }
+    set { tokens = newValue.map { [$0] } ?? [] }
+  }
+
+  public init(operation: UUID, token: String?, confirmed: Bool) {
+    self.operation = operation
+    self.tokens = token.map { [$0] } ?? []
+    self.confirmed = confirmed
+  }
+
+  private enum CodingKeys: String, CodingKey { case operation, token, tokens, confirmed }
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    operation = try values.decode(UUID.self, forKey: .operation)
+    confirmed = try values.decode(Bool.self, forKey: .confirmed)
+    let legacy = try values.decodeIfPresent(String.self, forKey: .token)
+    let retained = try values.decodeIfPresent([String].self, forKey: .tokens) ?? []
+    tokens = Array(Set(retained + (legacy.map { [$0] } ?? []))).sorted()
+  }
+  public func encode(to encoder: Encoder) throws {
+    var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encode(operation, forKey: .operation)
+    try values.encode(tokens, forKey: .tokens)
+    try values.encode(confirmed, forKey: .confirmed)
+  }
+
+  static func pending(prior: Self?, current: String?) -> Self {
+    var next = Self(operation: UUID(), token: nil, confirmed: false)
+    next.tokens = Array(Set((prior?.confirmed == false ? prior!.tokens : [])
+      + (current.map { [$0] } ?? []))).sorted()
+    return next
+  }
+}
+
+private let notificationPreferenceLock = NSRecursiveLock()
 
 /// Non-secret, persisted app preferences. Currently just the last server URL, kept so
 /// the app can auto-reconnect on launch without re-running onboarding (the token lives
@@ -8,6 +75,14 @@ import Foundation
 /// variant is used for previews and tests.
 @DependencyClient
 public struct PreferencesClient: Sendable {
+  /// nil preserves legacy intent; explicit false survives logout and identity-pref clearing.
+  public var loadNotificationsEnabled: @Sendable (_ scope: String) -> Bool? = { _ in nil }
+  public var saveNotificationsEnabled: @Sendable (_ scope: String, _ enabled: Bool) -> Void
+  public var loadNotificationRemoval: @Sendable (_ scope: String) -> NotificationRemoval? = { _ in nil }
+  /// Compare-and-confirm only the exact Off operation after authenticated unregister succeeds.
+  public var confirmNotificationRemoval: @Sendable (_ scope: String, _ operation: UUID) -> Bool = { _, _ in false }
+  /// Serialize register/unregister for this client so an older register cannot land after Off.
+  public var notificationOperation: @Sendable (_ scope: String, _ operation: @escaping @Sendable () async -> Void) async -> Void
   public var loadServerURL: @Sendable () -> String? = { nil }
   public var saveServerURL: @Sendable (_ url: String) -> Void
   public var clearServerURL: @Sendable () -> Void
@@ -93,6 +168,37 @@ public extension PreferencesClient {
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
+      loadNotificationsEnabled: { scope in store.object(forKey: "hermes.notifications." + scope) as? Bool },
+      saveNotificationsEnabled: { scope, enabled in
+        notificationPreferenceLock.withLock {
+          let removalKey = "hermes.notification-removal." + scope
+          let prior = store.data(forKey: removalKey).flatMap { try? JSONDecoder().decode(NotificationRemoval.self, from: $0) }
+          // Write uncertainty first: interrupted writes must never falsely confirm Off.
+          let removal = NotificationRemoval.pending(prior: prior, current: store.string(forKey: pushTokenKey))
+          store.set(try? JSONEncoder().encode(removal), forKey: removalKey)
+          store.set(enabled, forKey: "hermes.notifications." + scope)
+        }
+      },
+      loadNotificationRemoval: { scope in
+        notificationPreferenceLock.withLock {
+          store.data(forKey: "hermes.notification-removal." + scope)
+            .flatMap { try? JSONDecoder().decode(NotificationRemoval.self, from: $0) }
+        }
+      },
+      confirmNotificationRemoval: { scope, operation in
+        notificationPreferenceLock.withLock {
+          let key = "hermes.notification-removal." + scope
+          guard store.object(forKey: "hermes.notifications." + scope) as? Bool == false,
+                let data = store.data(forKey: key),
+                var removal = try? JSONDecoder().decode(NotificationRemoval.self, from: data),
+                removal.operation == operation else { return false }
+          removal.confirmed = true
+          removal.token = nil
+          store.set(try? JSONEncoder().encode(removal), forKey: key)
+          return true
+        }
+      },
+      notificationOperation: { scope, operation in await NotificationOperations.shared.run(scope, operation) },
       loadServerURL: { store.string(forKey: key) },
       saveServerURL: { store.set($0, forKey: key) },
       clearServerURL: { store.removeObject(forKey: key) },
@@ -152,6 +258,9 @@ public extension PreferencesClient {
 
   /// Deterministic in-memory store for previews and tests.
   static func inMemory() -> PreferencesClient {
+    let operations = NotificationOperations()
+    let notifications = LockIsolated<[String: Bool]>([:])
+    let removals = LockIsolated<[String: NotificationRemoval]>([:])
     let box = LockIsolated<String?>(nil)
     let seen = LockIsolated<[String: Int]>([:])
     let pinned = LockIsolated<[String]>([])
@@ -165,6 +274,27 @@ public extension PreferencesClient {
     let pushToken = LockIsolated<String?>(nil)
     let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
     return PreferencesClient(
+      loadNotificationsEnabled: { notifications.value[$0] },
+      saveNotificationsEnabled: { scope, enabled in
+        notificationPreferenceLock.withLock {
+          removals.withValue { values in
+            values[scope] = NotificationRemoval.pending(prior: values[scope], current: pushToken.value)
+          }
+          notifications.withValue { $0[scope] = enabled }
+        }
+      },
+      loadNotificationRemoval: { scope in notificationPreferenceLock.withLock { removals.value[scope] } },
+      confirmNotificationRemoval: { scope, operation in
+        notificationPreferenceLock.withLock {
+          guard notifications.value[scope] == false else { return false }
+          return removals.withValue { values in
+            guard var value = values[scope], value.operation == operation else { return false }
+            value.confirmed = true; value.token = nil; values[scope] = value
+            return true
+          }
+        }
+      },
+      notificationOperation: { scope, operation in await operations.run(scope, operation) },
       loadServerURL: { box.value },
       saveServerURL: { url in box.setValue(url) },
       clearServerURL: { box.setValue(nil) },
@@ -194,6 +324,30 @@ public extension PreferencesClient {
       savePushPromptSnooze: { count, until in pushSnooze.setValue((count: count, until: until)) },
       clearPushPromptSnooze: { pushSnooze.setValue(nil) }
     )
+  }
+}
+
+/// FIFO ownership per account/origin. Actor reentrancy alone would not serialize awaits.
+private actor NotificationOperations {
+  static let shared = NotificationOperations()
+  private var busy: Set<String> = []
+  private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+  func run(_ scope: String, _ operation: @Sendable () async -> Void) async {
+    if busy.contains(scope) {
+      await withCheckedContinuation { waiters[scope, default: []].append($0) }
+    } else {
+      busy.insert(scope)
+    }
+    if !Task.isCancelled { await operation() }
+    if var queue = waiters[scope], !queue.isEmpty {
+      let next = queue.removeFirst()
+      waiters[scope] = queue
+      next.resume()
+    } else {
+      busy.remove(scope)
+      waiters.removeValue(forKey: scope)
+    }
   }
 }
 

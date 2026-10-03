@@ -120,6 +120,12 @@ struct SettingsView: View {
             .foregroundStyle(.orange).font(.footnote)
         }
 
+        if let message = store.notificationStatus.message {
+          Text(message).font(.footnote).foregroundStyle(.secondary)
+        }
+        if store.notificationStatus == .unregisterFailed {
+          Button("Retry removing server registration") { store.send(.notificationsToggled(false)) }
+        }
         if store.pushAvailable {
           Toggle(
             "Notify me about approvals",
@@ -133,13 +139,13 @@ struct SettingsView: View {
               Label("Notifications are turned off", systemImage: "bell.slash")
                 .foregroundStyle(.orange).font(.footnote)
               if let url = URL(string: UIApplication.openSettingsURLString) {
-                Link("Enable in iOS Settings", destination: url)
+                Link("Review notification permission in iOS Settings", destination: url)
                   .font(.footnote)
               }
             }
           }
           Button("Send test notification") { store.send(.sendTestPushTapped) }
-            .disabled(store.testPushStatus == .sending)
+            .disabled(store.testPushStatus == .sending || !store.notificationsEnabled)
           switch store.testPushStatus {
           case .idle:
             EmptyView()
@@ -164,10 +170,52 @@ struct SettingsView: View {
         Text("Notifications")
       } footer: {
         if store.pushAvailable {
-          Text("Get a push when Hermes needs your approval, even while the app is closed.")
+          Text("Push delivery requires iOS permission, a push-enabled signed build, and the server plugin. Personal builds without push entitlements cannot receive remote notifications.")
         } else {
-          Text("Needs the hermes-push plugin running on your agent.")
+          Text("Needs the hermes-push plugin running on your agent and a signed build with push entitlements.")
         }
+      }
+
+      Section {
+        if let check = store.agentUpdateCheck {
+          LabeledContent("Installed", value: check.currentVersion)
+          if store.agentUpdateState == .ready && check.canApply && check.updateAvailable {
+            Text(check.behind.map { "\($0) commits available" } ?? "Update available")
+              .font(.footnote).foregroundStyle(.secondary)
+            Button("Update Hermes agent") { store.send(.startAgentUpdateTapped) }
+          } else if store.agentUpdateState == .ready {
+            Text(check.message ?? (check.canApply ? "Up to date" : "This install is updated outside Hermes."))
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+        }
+        switch store.agentUpdateState {
+        case .checking:
+          Label("Checking for updates…", systemImage: "arrow.triangle.2.circlepath")
+        case .starting, .running:
+          Label("Updating Hermes… This may interrupt active chats.", systemImage: "arrow.triangle.2.circlepath")
+        case .externalRunning:
+          Label("A server update is already running. Check again when it finishes.", systemImage: "arrow.triangle.2.circlepath")
+        case let .succeeded(version):
+          Label("Hermes updated\(version.map { " to \($0)" } ?? "").", systemImage: "checkmark.circle")
+            .foregroundStyle(.green)
+        case let .failed(reason), let .checkingFailed(reason):
+          Label(reason, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        case .uncertain:
+          Label("Update result unknown. Check the server update log before trying again.", systemImage: "questionmark.circle")
+            .foregroundStyle(.orange)
+        case .unsupported:
+          Text("This server doesn't support in-app updates.").foregroundStyle(.secondary)
+        case .ready:
+          EmptyView()
+        }
+        if store.agentUpdateState == .ready || store.agentUpdateState.isCheckFailure || store.agentUpdateState == .externalRunning {
+          Button("Check again") { store.send(.updateCheckTapped) }
+            .font(.footnote)
+        }
+      } header: {
+        Text("Hermes agent")
+      } footer: {
+        Text("Updates the server, not this app or the push plugin. Confirm only when nobody is using Hermes.")
       }
 
       Section("About") {
@@ -204,7 +252,9 @@ struct SettingsView: View {
         onLater: { showingPushGuide = false }
       )
     }
+    .bottomActionSheet($store.scope(state: \.confirmationDialog, action: \.confirmationDialog))
     .task { store.send(.task) }
+    .onDisappear { store.send(.settingsDisappeared) }
   }
 
   /// "0.1.0 (66)" — marketing version plus build number, straight from the Info.plist.
@@ -255,11 +305,10 @@ private struct AdvancedConnectionView: View {
 
       Section("Connection") {
         Button("Reconnect") { store.send(.reconnectTapped) }
-        Button("Copy Connection & Send diagnostics") {
-          store.send(.copyConnectionTraceTapped)
+        NavigationLink("Diagnostics privacy & export") {
+          DiagnosticsSettingsView(store: store.scope(
+            state: \.diagnosticsSettings, action: \.diagnosticsSettings))
         }
-        Text("Copies only local timestamps, slot numbers, random send IDs, outcomes and row counts. Review before sharing.")
-          .font(.footnote).foregroundStyle(.secondary)
         NavigationLink {
           ConnectionDebugView(entries: store.log)
         } label: {

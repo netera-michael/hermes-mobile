@@ -256,8 +256,8 @@ store, never the shared one.
   `HermesRESTClient`.** By the time it fires the app has discarded its own credentials and is on
   its way to the login screen, so a failure changes nothing the user could see or act on. It is
   logged, never surfaced, and the closure is non-throwing so no call site can depend on the
-  result. (`AppFeature.unregisterPushOnLogout` swallows too, for the same reason and on the same
-  path — the server prunes dead tokens on a 410.)
+  result. (Logout uses the isolated `LogoutCleanup` capability instead; remote removal remains
+  unconfirmed unless an authenticated Settings unregister succeeds.)
 - **Gateway: `.cookie` and `.bearer` SHARE the connect branch** (`case .cookie, .bearer:`).
   Once `mintTicket` takes the whole `AuthSession`, the two gated regimes differ ONLY inside the
   minter (cookie jar vs `Authorization: Bearer`); the setup task, the `Task.checkCancellation()`
@@ -268,29 +268,32 @@ store, never the shared one.
 
 ### Ordering contract
 
-**`rest.logout` and `rest.unregisterPush` both resolve auth through the store, so both MUST
-fire BEFORE `bearerTokens.clear()`.** A drained store makes either request a silent no-op —
-which for the unregister means this device quietly keeps receiving pushes for an account it
-just left. All three logout paths (`connectionFailed.logoutConfirmed`, `reauth.quit`,
-`.disconnect`) share one `serverSideLogout(connection:)` helper that **concatenates** unregister
-→ logout → drain. Non-bearer connections return the unregister effect unchanged, so token and
-cookie logout requests stay byte-identical (`tokenAndCookieLogoutSendNoLogoutRequest` asserts
-`/auth/logout` fires zero times for both).
+All four entries (`connectionFailed.logoutConfirmed`, `reauth.quit`, home delegate
+`disconnect`, and Settings `clearTokenTapped`) converge in AppFeature. In the initiating
+reduction, capture the old connection's cleanup capability, then synchronously revoke
+normal cookie/bearer leases and persistence, retire/delete saved credentials, clear ordinary
+preferences and replace authenticated UI with onboarding. Settings does not delete credentials
+or enqueue a second disconnect. Network cleanup is not a prerequisite for local revocation.
 
-**Every logout path calls `BearerTokenStore.detachPersistence()` synchronously, immediately
-before its `keychain.deleteSession()`** (`AppFeature` for `logoutConfirmed`/`reauth.quit`,
-`SettingsFeature` for `.disconnect`). Both logout hops authenticate through the store, so a
-pair inside its refresh leeway rotates mid-logout; with the hook still armed that rotation
-rewrites the entry the reducer just deleted and the dead pair is restored on the next launch.
-The detach is synchronous for exactly this reason — an `await`ed one runs after the delete — and
-it also revokes store ownership, so an in-flight sign-in cannot re-arm the hook afterwards
-(`BearerStoreClaim`).
+The single-use `LogoutCleanup` capability holds only immutable old-origin auth and a device
+token. Its five-second lifetime starts at capture (including notification-queue wait), and
+it uses an ephemeral transport with redirects refused, no cookie ingestion, no persistence,
+and no bearer refresh. It attempts unregister and, for bearer only, `/auth/logout`. Expired
+access may fail; cleanup is best effort, not a guarantee of remote removal. No trailing
+store drain or preferences clear can erase a replacement login.
 
-**The logout's trailing drain carries a claim**, minted in the reducer body alongside the
-detach. Both of its hops are best-effort against a server that is often *why* the user is
-logging out, so each can stall for `URLSession`'s 60 s default while the user completes a fresh
-sign-in on the onboarding screen the same reduction landed them on; an unclaimed
-`bearerTokens.clear()` would then erase credentials that just succeeded.
+Keychain deletion first writes a nonsecret durable retirement/generation record. All cold
+loads check it before reading or rehydrating credentials. Failed deletion leaves unusable
+bytes and a truthful onboarding warning; failure to write retirement itself also revokes
+in-process access but cannot promise durable revocation. A deliberate successful new login
+publishes a fresh generation only after storage succeeds. Automatic cookie/bearer rotation
+is generation-bound and cannot reopen retirement or overwrite a newer login.
+
+Scoped notification Off and unresolved removal survive logout and identity cleanup. The
+scoped retained retry targets (all unresolved tokens) survive clearing the global device token; logout's best-effort cleanup
+has no confirmation callback and therefore does not falsely mark that uncertainty resolved.
+Only matching authenticated Settings unregister success for every retained target confirms removal. See
+`push-notifications.md` for reopen, missing-token and manual retry behavior.
 
 **`AppFeature` does NOT reseed the store on `.reauthenticated`.** The sign-in leg already put
 the fresh pair there (it is what the sheet's validating call authenticated with) and may have
@@ -326,7 +329,7 @@ behind — with ONE deliberate exception: an **abandoned** attempt (superseded b
 provider tap, dropped by an edited server URL, or torn down by a logout) touches neither the
 store nor the Keychain — it does not seed, drain or persist. Cancellation is not a verdict on
 the credentials, and both are process-wide: writing there would write over whatever superseded
-it, or drain the store the logout's own hops still need. That is enforced by ownership, not by
+it, or drain a replacement login. That is enforced by ownership, not by
 cancellation checks at the call site — each attempt claims the store up front and the store
 itself drops every late arrival; `BearerStoreClaim` is the normative statement of the rule.
 
