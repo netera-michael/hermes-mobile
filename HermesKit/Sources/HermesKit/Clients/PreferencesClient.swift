@@ -68,6 +68,7 @@ public struct NotificationRemoval: Codable, Equatable, Sendable {
 }
 
 private let notificationPreferenceLock = NSRecursiveLock()
+private let ownedUpdateLock = NSLock()
 
 /// Non-secret, persisted app preferences. Currently just the last server URL, kept so
 /// the app can auto-reconnect on launch without re-running onboarding (the token lives
@@ -135,6 +136,27 @@ public struct PreferencesClient: Sendable {
   public var loadPushPromptSnooze: @Sendable () -> (count: Int, until: Date)? = { nil }
   public var savePushPromptSnooze: @Sendable (_ count: Int, _ until: Date) -> Void
   public var clearPushPromptSnooze: @Sendable () -> Void
+  /// Non-secret identity of the backend update THIS phone started, scoped to one
+  /// server/account (`notificationPreferenceScope`). One slot only: loading under a
+  /// different scope clears it, so ownership never crosses servers or accounts.
+  public var loadOwnedAgentUpdate: @Sendable (_ scope: String) -> String? = { _ in nil }
+  public var saveOwnedAgentUpdate: @Sendable (_ scope: String, _ actionID: String) -> Void
+  /// Compare-and-clear: removes the slot only if it still names this scope + action.
+  public var clearOwnedAgentUpdate: @Sendable (_ scope: String, _ actionID: String) -> Void
+  /// Persist the owned ID together with the non-secret time the phone sent the POST (a lower
+  /// bound for the server run's `started_at`), so an older receipt can't settle a newer run.
+  public var saveOwnedAgentUpdateRequested: @Sendable (_ scope: String, _ actionID: String, _ requestedAt: Date) -> Void = { _, _, _ in }
+  /// The POST time saved with the owned ID, or nil (unknown/legacy) for this scope.
+  public var loadOwnedAgentUpdateRequestedAt: @Sendable (_ scope: String) -> Date? = { _ in nil }
+}
+
+/// Persisted form of `PreferencesClient.loadOwnedAgentUpdate`.
+struct OwnedAgentUpdate: Codable, Equatable, Sendable {
+  var scope: String
+  var actionID: String
+  var requestedAt: Date?
+
+  func names(_ scope: String, _ actionID: String) -> Bool { self.scope == scope && self.actionID == actionID }
 }
 
 public extension PreferencesClient {
@@ -165,6 +187,7 @@ public extension PreferencesClient {
     let pushTokenKey = "hermes.push-device-token"
     let pushSnoozeCountKey = "hermes.push-prompt-snooze-count"
     let pushSnoozeUntilKey = "hermes.push-prompt-snooze-until"
+    let ownedUpdateKey = "hermes.agent-update-owned"
     // UserDefaults is documented thread-safe but not Sendable.
     nonisolated(unsafe) let store = defaults
     return PreferencesClient(
@@ -252,6 +275,43 @@ public extension PreferencesClient {
       clearPushPromptSnooze: {
         store.removeObject(forKey: pushSnoozeCountKey)
         store.removeObject(forKey: pushSnoozeUntilKey)
+      },
+      loadOwnedAgentUpdate: { scope in
+        ownedUpdateLock.withLock {
+          guard let data = store.data(forKey: ownedUpdateKey) else { return nil }
+          guard let owned = try? JSONDecoder().decode(OwnedAgentUpdate.self, from: data),
+                owned.scope == scope else {
+            store.removeObject(forKey: ownedUpdateKey)
+            return nil
+          }
+          return owned.actionID
+        }
+      },
+      saveOwnedAgentUpdate: { scope, id in
+        ownedUpdateLock.withLock {
+          store.set(try? JSONEncoder().encode(OwnedAgentUpdate(scope: scope, actionID: id)), forKey: ownedUpdateKey)
+        }
+      },
+      clearOwnedAgentUpdate: { scope, id in
+        ownedUpdateLock.withLock {
+          guard let data = store.data(forKey: ownedUpdateKey),
+                let owned = try? JSONDecoder().decode(OwnedAgentUpdate.self, from: data),
+                owned.names(scope, id) else { return }
+          store.removeObject(forKey: ownedUpdateKey)
+        }
+      },
+      saveOwnedAgentUpdateRequested: { scope, id, at in
+        ownedUpdateLock.withLock {
+          store.set(try? JSONEncoder().encode(OwnedAgentUpdate(scope: scope, actionID: id, requestedAt: at)), forKey: ownedUpdateKey)
+        }
+      },
+      loadOwnedAgentUpdateRequestedAt: { scope in
+        ownedUpdateLock.withLock {
+          guard let data = store.data(forKey: ownedUpdateKey),
+                let owned = try? JSONDecoder().decode(OwnedAgentUpdate.self, from: data),
+                owned.scope == scope else { return nil }
+          return owned.requestedAt
+        }
       }
     )
   }
@@ -273,6 +333,7 @@ public extension PreferencesClient {
     let selectedProfile = LockIsolated<String?>(nil)
     let pushToken = LockIsolated<String?>(nil)
     let pushSnooze = LockIsolated<(count: Int, until: Date)?>(nil)
+    let ownedUpdate = LockIsolated<OwnedAgentUpdate?>(nil)
     return PreferencesClient(
       loadNotificationsEnabled: { notifications.value[$0] },
       saveNotificationsEnabled: { scope, enabled in
@@ -322,7 +383,24 @@ public extension PreferencesClient {
       clearPushDeviceToken: { pushToken.setValue(nil) },
       loadPushPromptSnooze: { pushSnooze.value },
       savePushPromptSnooze: { count, until in pushSnooze.setValue((count: count, until: until)) },
-      clearPushPromptSnooze: { pushSnooze.setValue(nil) }
+      clearPushPromptSnooze: { pushSnooze.setValue(nil) },
+      loadOwnedAgentUpdate: { scope in
+        ownedUpdate.withValue { value in
+          guard let owned = value else { return nil }
+          guard owned.scope == scope else { value = nil; return nil }
+          return owned.actionID
+        }
+      },
+      saveOwnedAgentUpdate: { scope, id in ownedUpdate.setValue(OwnedAgentUpdate(scope: scope, actionID: id)) },
+      clearOwnedAgentUpdate: { scope, id in
+        ownedUpdate.withValue { if $0?.names(scope, id) == true { $0 = nil } }
+      },
+      saveOwnedAgentUpdateRequested: { scope, id, at in
+        ownedUpdate.setValue(OwnedAgentUpdate(scope: scope, actionID: id, requestedAt: at))
+      },
+      loadOwnedAgentUpdateRequestedAt: { scope in
+        ownedUpdate.withValue { $0?.scope == scope ? $0?.requestedAt : nil }
+      }
     )
   }
 }

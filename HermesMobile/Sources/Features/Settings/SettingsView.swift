@@ -177,7 +177,13 @@ struct SettingsView: View {
       }
 
       Section {
-        if let check = store.agentUpdateCheck {
+        // E1 correction 3 (option B, view-only): `agentUpdateCheck` is the PRE-update
+        // availability result, so while `.succeeded` is shown its "Installed" version is stale.
+        // Rather than add a reducer-driven recheck, show the version from our own correlated
+        // receipt (or no row if the receipt had none). "Check again" refreshes availability.
+        if case let .succeeded(version) = store.agentUpdateState {
+          if let version { LabeledContent("Installed", value: version) }
+        } else if let check = store.agentUpdateCheck {
           LabeledContent("Installed", value: check.currentVersion)
           if store.agentUpdateState == .ready && check.canApply && check.updateAvailable {
             Text(check.behind.map { "\($0) commits available" } ?? "Update available")
@@ -201,16 +207,27 @@ struct SettingsView: View {
         case let .failed(reason), let .checkingFailed(reason):
           Label(reason, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
         case .uncertain:
-          Label("Update result unknown. Check the server update log before trying again.", systemImage: "questionmark.circle")
+          Label("Update result unknown. Check its status, or the server update log, before trying again.", systemImage: "questionmark.circle")
             .foregroundStyle(.orange)
         case .unsupported:
           Text("This server doesn't support in-app updates.").foregroundStyle(.secondary)
         case .ready:
           EmptyView()
         }
-        if store.agentUpdateState == .ready || store.agentUpdateState.isCheckFailure || store.agentUpdateState == .externalRunning {
-          Button("Check again") { store.send(.updateCheckTapped) }
+        if store.agentUpdateState.offersStatusRecheck {
+          // Read-only status GET; never re-sends the update request.
+          Button(store.agentUpdateChecking ? "Checking status…" : "Check update status") {
+            store.send(.updateCheckTapped)
+          }
+          .font(.footnote)
+          .disabled(store.agentUpdateChecking)
+        } else if store.agentUpdateState == .ready || store.agentUpdateState.isCheckFailure
+                    || store.agentUpdateState.isSettledOutcome {
+          // After success/failure ownership is released, so this is a fresh availability GET;
+          // it never re-sends the update request.
+          Button(store.agentUpdateChecking ? "Checking…" : "Check again") { store.send(.updateCheckTapped) }
             .font(.footnote)
+            .disabled(store.agentUpdateChecking)
         }
       } header: {
         Text("Hermes agent")
@@ -326,5 +343,15 @@ private struct AdvancedConnectionView: View {
     }
     .navigationTitle("Connection")
     .navigationBarTitleDisplayMode(.inline)
+  }
+}
+
+private extension SettingsFeature.State.AgentUpdateState {
+  /// `.succeeded` / `.failed`: settled and released; only a fresh availability check is offered.
+  var isSettledOutcome: Bool {
+    switch self {
+    case .succeeded, .failed: true
+    default: false
+    }
   }
 }

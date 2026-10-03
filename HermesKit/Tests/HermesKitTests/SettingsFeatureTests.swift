@@ -163,7 +163,8 @@ struct SettingsFeatureTests {
       $0.hermesREST.pushPluginInfo = { @Sendable _ in PushPluginInfo(status: .unknown) }
     }
 
-    await store.send(.task)
+    // E1: appearance opens a new updater observation generation (fences stale responses).
+    await store.send(.task) { $0.agentUpdateGeneration = 1 }
     // `.task` merges three concurrent effects (log stream, OS authorization status, plugin
     // hub probe); their completion order isn't guaranteed, so assert only this test's
     // subject rather than pinning an incidental interleaving.
