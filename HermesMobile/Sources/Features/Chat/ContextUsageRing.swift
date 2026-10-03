@@ -30,7 +30,10 @@ struct ContextUsageRing: View {
       Button {
         showDetail = true
       } label: {
+        // 44pt hit area around the 24pt ring without inflating it (D1).
         ring
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(.rect)
       }
       .buttonStyle(.plain)
       .popover(isPresented: $showDetail) {

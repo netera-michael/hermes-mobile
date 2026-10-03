@@ -4,7 +4,8 @@ import SwiftUI
 /// The queued-prompt panel (#66): compact rows pinned between the transcript and the
 /// composer (above the slash-suggestion panel — deliberately NOT in the transcript, so
 /// wholesale hydrates can never touch it). Each row is a frozen draft waiting for the
-/// running turn to end; a visible ellipsis menu and long-press menu share all actions.
+/// running turn to end; a visible ellipsis menu and long-press menu share all actions
+/// (D1 copy: "Steer current turn", "Interrupt & send" mid-turn / "Send now" idle).
 /// Steer delivers the text into the RUNNING turn without cancelling it, so it is
 /// offered only while a turn is live and only for entries the gateway can carry
 /// (text-only, non-empty, not a slash command) — see `SteerEligibility`.
@@ -17,7 +18,7 @@ import SwiftUI
 struct QueuedPromptsPanel: View {
   let entries: [QueuedPrompt]
   /// Parked (#66): a manual Stop or a turn error suspended auto-drain — the rows wait
-  /// for an explicit Send Now. Swaps the row icon and adds the "held" header.
+  /// for an explicit "Send now" / "Interrupt & send". Swaps the row icon and adds the "held" header.
   let isParked: Bool
   /// Mirrors the reducer's Edit guard (`.queuedPromptEditTapped` requires an empty
   /// composer): the menu item is disabled while a draft is mid-typing so the two can't
@@ -110,7 +111,11 @@ struct QueuedPromptsPanel: View {
       }
       .accessibilityLabel("Actions for queued message")
       .accessibilityValue(displayText(entry))
-      .accessibilityHint("Send, edit, or delete this message. Steer is available for eligible running turns.")
+      .accessibilityHint(!isTurnRunning
+        ? "Send now, edit, or delete this message."
+        : (!deliveryBlocked && SteerEligibility.canSteerNow(entry, isTurnRunning: isTurnRunning))
+          ? "Interrupt and send, steer the current turn, edit, or delete this message."
+          : "Interrupt and send, edit, or delete this message.")
       .accessibilityIdentifier("queue.actions.\(entry.id.uuidString)")
     }
     .padding(.horizontal, 12)
@@ -125,19 +130,34 @@ struct QueuedPromptsPanel: View {
   /// One definition keeps the visible menu and long-press eligibility/callbacks identical.
   @ViewBuilder
   private func actions(for entry: QueuedPrompt) -> some View {
+    // D1: action names say what happens to the running turn; eligibility is unchanged
+    // (`SteerEligibility` + `deliveryBlocked`). Anything withheld or disabled says why.
     if !deliveryBlocked, SteerEligibility.canSteerNow(entry, isTurnRunning: isTurnRunning) {
       Section("Without interrupting the current turn") {
         Button { onSteer(entry.id) } label: {
-          Label("Steer Now", systemImage: "arrow.turn.down.right")
+          Label(ComposerControls.steerTitle, systemImage: "arrow.turn.down.right")
         }
-        .accessibilityHint("Corrects the running turn without stopping it.")
+        .accessibilityHint("Adds this to the running turn without stopping it.")
       }
     }
-    Section(isTurnRunning ? "Send next (interrupts a running turn)" : "Send as a new turn") {
+    Section {
       Button { onSendNow(entry.id) } label: {
-        Label("Send Now", systemImage: "paperplane")
+        Label(ComposerControls.queueSendTitle(isTurnRunning: isTurnRunning),
+              systemImage: isTurnRunning ? "bolt.fill" : "paperplane")
       }
       .disabled(deliveryBlocked)
+      .accessibilityHint(isTurnRunning
+        ? "Stops the running turn, then sends this message."
+        : "Sends this message as a new turn.")
+    } header: {
+      if deliveryBlocked {
+        Text(ComposerControls.deliveryPendingHeader)
+      } else if isTurnRunning, let reason = SteerEligibility.unsteerableReason(entry) {
+        // Why Steer is withheld, without losing that this action interrupts.
+        Text("Stops the running turn first. \(reason)")
+      } else {
+        Text(isTurnRunning ? "Stops the running turn first" : "Send as a new turn")
+      }
     }
     Section {
       Button { onEdit(entry.id) } label: {

@@ -56,6 +56,15 @@ struct ChatView: View {
         recordingSeconds: store.recordingSeconds,
         attachmentsSupported: !store.attachmentsUnsupported,
         attachments: store.attachments,
+        isSlashExecuting: store.slashExecInFlight,
+        isPreparingAttachments: ComposerControls.isPreparingAttachments(
+          attachments: store.attachments, submitOutcome: store.submitOperation?.outcome),
+        blockers: ComposerControls.Blockers(
+          isPasting: store.pendingPasteCount > 0,
+          hasBlockingCard: store.pendingInteraction != nil,
+          isReconnecting: store.status != .ready,
+          deliveryPending: store.deliveryBlocked,
+          isBranching: store.isBranching),
         // Raising a blocking card hands the keyboard back (`ComposerTextView.blockingCardToken`):
         // the card can't be answered from the composer — `canSend` is false while one stands —
         // and the keyboard shrinks the very fixed region the card lives in, which is #65's own

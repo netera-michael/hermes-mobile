@@ -576,6 +576,40 @@ final class ComposerTextViewTests: XCTestCase {
     XCTAssertTrue(field.isFirstResponder)
   }
 
+  /// D1: an approval/clarify card blocks Send, never drafting — typing, Return-as-newline and
+  /// the paste offer all keep working while the card's token stands.
+  func testDraftEditingReturnAndPasteKeepWorkingWhileACardStands() {
+    let writes = Recorder<String>()
+    let composer = ComposerTextView(
+      text: Binding(get: { writes.values.last ?? "" }, set: { writes.values.append($0) }),
+      blockingCardToken: 3
+    )
+    let host = UIHostingController(rootView: composer)
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 200))
+    window.rootViewController = host
+    window.makeKeyAndVisible()
+    window.layoutIfNeeded()
+    defer {
+      window.isHidden = true
+      window.rootViewController = nil
+    }
+    guard let field = Self.firstTextView(in: host.view) else {
+      return XCTFail("the representable produced no ComposerInputTextView")
+    }
+    XCTAssertTrue(field.becomeFirstResponder())
+    XCTAssertTrue(field.isEditable)
+    field.insertText("fix")
+    field.insertText("\n")
+    field.insertText("later")
+    XCTAssertEqual(field.text, "fix\nlater", "Return is a newline even with a card standing")
+    XCTAssertEqual(writes.values.last, "fix\nlater", "edits reach the binding under the card")
+    XCTAssertTrue(field.isFirstResponder, "re-renders under the same card don't drop focus")
+    UIPasteboard.general.string = "pasted"
+    XCTAssertTrue(
+      field.canPerformAction(#selector(UIResponderStandardEditActions.paste(_:)), withSender: nil),
+      "stock text paste stays offered while a card stands")
+  }
+
   private static func firstTextView(in view: UIView) -> ComposerInputTextView? {
     if let hit = view as? ComposerInputTextView { return hit }
     for subview in view.subviews {
