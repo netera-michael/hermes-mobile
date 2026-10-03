@@ -122,11 +122,13 @@ struct ComposerView: View {
 
   @ViewBuilder
   private var recordingBar: some View {
-    if recording == .transcribing {
+    if recording == .transcribing || recording == .requestingPermission {
       HStack(spacing: 10) {
         ProgressView().controlSize(.small)
-        Text("Transcribing…").font(.callout).foregroundStyle(.secondary)
+        Text(recording == .transcribing ? "Transcribing…" : "Allow microphone")
+          .font(.callout).foregroundStyle(.secondary)
         Spacer()
+        Button("Cancel", action: onCancelRecording)
       }
       .frame(minHeight: 40)
     } else {
@@ -137,6 +139,7 @@ struct ComposerView: View {
         .foregroundStyle(.secondary)
         .accessibilityLabel("Cancel recording")
 
+        Text("Recording").font(.callout)
         RecordingWaveform(levels: waveformLevels)
 
         Text(Self.elapsed(recordingSeconds))

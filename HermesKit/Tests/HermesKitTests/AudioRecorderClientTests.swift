@@ -27,8 +27,9 @@ struct AudioRecorderClientTests {
   @Test func testValueGrantsPermissionAndReturnsCannedAudio() async throws {
     let client = AudioRecorderClient.testValue
     #expect(await client.requestPermission() == true)
-    try await client.startRecording()
-    let audio = try await client.stopRecording()
+    let id = UUID()
+    try await client.startRecording(id)
+    let audio = try await client.stopRecording(id)
     #expect(audio.mimeType == "audio/m4a")
     #expect(!audio.data.isEmpty)
   }
@@ -36,7 +37,7 @@ struct AudioRecorderClientTests {
   @Test func testValueLevelsStreamEmitsThenFinishes() async {
     let client = AudioRecorderClient.testValue
     var collected: [Float] = []
-    for await level in client.levels() { collected.append(level) }
+    for await level in client.levels(UUID()) { collected.append(level) }
     // Finite stream so the for-await terminates (a hung stream would deadlock the test).
     #expect(collected == [0.2, 0.6, 0.4])
   }

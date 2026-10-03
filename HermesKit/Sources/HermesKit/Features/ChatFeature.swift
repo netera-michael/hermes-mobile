@@ -174,6 +174,8 @@ public struct ChatFeature {
     public var copiedIDToastToken: Int?
     /// Voice-input recording lifecycle (#7).
     public var recording: RecordingState
+    /// One identity spans permission, capture, stop and transcription.
+    public var voiceOperationID: UUID? = nil
     /// Rolling window of normalized (0...1) mic amplitudes driving the recording waveform.
     public var waveformLevels: [Float]
     /// Seconds elapsed while recording, for the composer's mm:ss readout.
@@ -1014,13 +1016,13 @@ public struct ChatFeature {
     case copiedIDToastExpired
     // Voice input (#7)
     case voiceButtonTapped
-    case recordingPermission(Bool)
-    case recordingStarted
-    case recordingLevel(Float)
-    case recordingTick
-    case recordingStopped(RecordedAudio)
-    case transcriptionSucceeded(String)
-    case voiceInputFailed(message: String)
+    case recordingPermission(UUID, Bool)
+    case recordingStarted(UUID)
+    case recordingLevel(UUID, Float)
+    case recordingTick(UUID)
+    case recordingStopped(UUID, RecordedAudio)
+    case transcriptionSucceeded(UUID, String)
+    case voiceInputFailed(UUID, message: String)
     case recordingCancelled
     case toolTapped(id: ChatRow.ID)
     case toolDetailDismissed
@@ -1184,7 +1186,7 @@ public struct ChatFeature {
   static let reconnectBannerGrace: Duration = .seconds(2)
 
   private enum CancelID: Hashable {
-    case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer,
+    case socket, reconnect, hydrate, copyFeedback, copyIDToast, voiceLevels, voiceTimer, voiceWork,
          thinkingTimer, persist, replay, reconnectBanner, workerSnapshot, workerPoll,
          attachmentSubmit
     /// One id per `config.set` key so a newer pick for that key supersedes the in-flight
@@ -1785,6 +1787,7 @@ public struct ChatFeature {
         // Suspending the watchdog must not replace the immediate snapshot + anchor
         // flush. Keep the live socket intact until AppFeature's grace window expires.
         return .merge(
+          releaseVoiceResources(&state),
           .send(.persistNow),
           .cancel(id: CancelID.workerSnapshot), .cancel(id: CancelID.workerPoll),
           .run { [gateway] _ in await gateway.setLivenessEnabled(false) }
@@ -2664,62 +2667,83 @@ public struct ChatFeature {
       // MARK: Voice input (#7)
 
       case .voiceButtonTapped:
+        guard !state.isTornDown, state.workerForeground, state.workerViewVisible else { return .none }
         switch state.recording {
         case .idle:
+          let id = uuid()
+          state.voiceOperationID = id
           state.recording = .requestingPermission
           return .run { [audioRecorder] send in
-            await send(.recordingPermission(audioRecorder.requestPermission()))
-          }
+            let granted = await audioRecorder.requestPermission()
+            try Task.checkCancellation()
+            await send(.recordingPermission(id, granted))
+          }.cancellable(id: CancelID.voiceWork)
         case .recording:
-          // Stop and hand the audio off to transcription.
+          guard let id = state.voiceOperationID else { return .none }
           state.recording = .transcribing
           return .merge(
             .cancel(id: CancelID.voiceLevels),
             .cancel(id: CancelID.voiceTimer),
             .run { [audioRecorder] send in
-              await send(.recordingStopped(try await audioRecorder.stopRecording()))
-            } catch: { _, send in
-              await send(.voiceInputFailed(message: "Couldn’t finish recording."))
-            }
+              do {
+                let audio = try await audioRecorder.stopRecording(id)
+                try Task.checkCancellation()
+                await send(.recordingStopped(id, audio))
+              } catch {
+                await audioRecorder.cancel(id)
+                guard !Task.isCancelled else { return }
+                await send(.voiceInputFailed(id, message: "Couldn’t finish recording."))
+              }
+            }.cancellable(id: CancelID.voiceWork)
           )
         case .requestingPermission, .transcribing:
           return .none
         }
 
-      case let .recordingPermission(granted):
+      case let .recordingPermission(id, granted):
+        guard state.voiceOperationID == id, state.recording == .requestingPermission else { return .none }
         guard granted else {
-          state.recording = .idle
           state.errorBanner = "Microphone access is off. Enable it in Settings to use voice input."
-          return .none
+          return releaseVoiceResources(&state)
         }
         return .run { [audioRecorder] send in
-          try await audioRecorder.startRecording()
-          await send(.recordingStarted)
-        } catch: { _, send in
-          await send(.voiceInputFailed(message: "Couldn’t start recording."))
-        }
+          do {
+            try Task.checkCancellation()
+            try await audioRecorder.startRecording(id)
+            try Task.checkCancellation()
+            await send(.recordingStarted(id))
+          } catch {
+            // A non-cooperative start may finish after cancellation. Cleanup is scoped to
+            // its owner, never a blanket stop of a replacement operation's recorder.
+            await audioRecorder.cancel(id)
+            guard !Task.isCancelled else { return }
+            await send(.voiceInputFailed(id, message: "Couldn’t start recording."))
+          }
+        }.cancellable(id: CancelID.voiceWork)
 
-      case .recordingStarted:
+      case let .recordingStarted(id):
+        guard state.voiceOperationID == id, state.recording == .requestingPermission else { return .none }
         state.recording = .recording
         state.waveformLevels = []
         state.recordingSeconds = 0
         return .merge(
           .run { [audioRecorder] send in
-            for await level in audioRecorder.levels() {
-              await send(.recordingLevel(level))
+            for await level in audioRecorder.levels(id) {
+              await send(.recordingLevel(id, level))
             }
           }
           .cancellable(id: CancelID.voiceLevels, cancelInFlight: true),
           .run { [clock] send in
             while true {
               try await clock.sleep(for: .seconds(1))
-              await send(.recordingTick)
+              await send(.recordingTick(id))
             }
           }
           .cancellable(id: CancelID.voiceTimer, cancelInFlight: true)
         )
 
-      case let .recordingLevel(level):
+      case let .recordingLevel(id, level):
+        guard state.voiceOperationID == id, state.recording == .recording else { return .none }
         state.waveformLevels.append(level)
         let maxBars = 48
         if state.waveformLevels.count > maxBars {
@@ -2727,52 +2751,45 @@ public struct ChatFeature {
         }
         return .none
 
-      case .recordingTick:
+      case let .recordingTick(id):
+        guard state.voiceOperationID == id, state.recording == .recording else { return .none }
         state.recordingSeconds += 1
         return .none
 
-      case let .recordingStopped(audio):
+      case let .recordingStopped(id, audio):
+        guard state.voiceOperationID == id, state.recording == .transcribing else { return .none }
         return .run { [rest, connection = state.connection] send in
           do {
+            try Task.checkCancellation()
             let text = try await rest.transcribe(connection, audio.dataURL, audio.mimeType)
-            await send(.transcriptionSucceeded(text))
+            try Task.checkCancellation()
+            await send(.transcriptionSucceeded(id, text))
           } catch {
+            guard !Task.isCancelled else { return }
             let message = (error as? RESTError)?.message ?? "Couldn’t transcribe the audio."
-            await send(.voiceInputFailed(message: message))
+            await send(.voiceInputFailed(id, message: message))
           }
-        }
+        }.cancellable(id: CancelID.voiceWork)
 
-      case let .transcriptionSucceeded(text):
-        state.recording = .idle
-        state.waveformLevels = []
-        state.recordingSeconds = 0
+      case let .transcriptionSucceeded(id, text):
+        guard state.voiceOperationID == id, state.recording == .transcribing else { return .none }
         let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !transcript.isEmpty {
-          // Append to whatever's already typed, with a single separating space.
           if state.composerText.isEmpty {
             state.composerText = transcript
           } else {
             state.composerText += (state.composerText.hasSuffix(" ") ? "" : " ") + transcript
           }
         }
-        return .none
+        return releaseVoiceResources(&state)
 
-      case let .voiceInputFailed(message):
-        state.recording = .idle
-        state.waveformLevels = []
-        state.recordingSeconds = 0
+      case let .voiceInputFailed(id, message):
+        guard state.voiceOperationID == id, state.recording.isBusy else { return .none }
         state.errorBanner = message
-        return .merge(.cancel(id: CancelID.voiceLevels), .cancel(id: CancelID.voiceTimer))
+        return releaseVoiceResources(&state)
 
       case .recordingCancelled:
-        state.recording = .idle
-        state.waveformLevels = []
-        state.recordingSeconds = 0
-        return .merge(
-          .cancel(id: CancelID.voiceLevels),
-          .cancel(id: CancelID.voiceTimer),
-          .run { [audioRecorder] _ in await audioRecorder.cancel() }
-        )
+        return releaseVoiceResources(&state)
 
       // MARK: Attachments (#8)
 
@@ -3822,14 +3839,16 @@ public struct ChatFeature {
   /// state, cancel the level/tick effects, and release the mic/session if we leave
   /// mid-recording.
   private func releaseVoiceResources(_ state: inout State) -> Effect<Action> {
-    let wasRecording = state.recording.isBusy
+    let id = state.voiceOperationID
+    state.voiceOperationID = nil
     state.recording = .idle
     state.waveformLevels = []
     state.recordingSeconds = 0
     return .merge(
       .cancel(id: CancelID.voiceLevels),
       .cancel(id: CancelID.voiceTimer),
-      wasRecording ? .run { [audioRecorder] _ in await audioRecorder.cancel() } : .none
+      .cancel(id: CancelID.voiceWork),
+      id.map { id in .run { [audioRecorder] _ in await audioRecorder.cancel(id) } } ?? .none
     )
   }
 
