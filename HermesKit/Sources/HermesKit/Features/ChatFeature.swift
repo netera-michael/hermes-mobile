@@ -216,6 +216,12 @@ public struct ChatFeature {
     var liveLifecycle: Int = 0
     public var attachmentReceipts: [UUID: AttachmentReceipt] = [:]
     public var legacyStagingBlocked = false
+    /// B4: set only when the SOLE reason for `legacyStagingBlocked` is a hydrate that
+    /// landed while this submit operation still owned every staged receipt and was
+    /// unacknowledged. Only that operation's definitive acceptance may lift the latch.
+    /// Every other staging reason (removal, uncertain/partial upload, replaced session,
+    /// foreign batch, socket loss, relaunch) is sticky and resets this to `nil`.
+    var stagingBlockOwner: UUID? = nil
     var recoveryKey: String? {
       guard let sessionKey else { return nil }
       return recoveryKey(for: sessionKey)
@@ -1258,7 +1264,7 @@ public struct ChatFeature {
           state.submitRecoveryKeys = [key]
           state.submitOperation = SubmitOperation(id: operation.operationID, sessionID: "", outcome: .unknown)
         } else if let key = state.recoveryKey, deliveryRecovery.isBlocked(key) {
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
           state.errorBanner = "An earlier delivery or attachment staging was not confirmed. Review history and start a new chat; this server cannot safely recover its receipt."
         }
         // Seed the display prefs (#55) on the FIRST appearance only, right where the slot
@@ -1571,7 +1577,7 @@ public struct ChatFeature {
         state.deliveryLookupInFlight = false
         if state.durableDeliveryKey != nil { state.submitOperation?.outcome = .unknown }
         if !state.attachmentReceipts.isEmpty {
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
         }
         guard !state.isTornDown, !state.socketSuspended else { return .none }
         state.isDialing = false
@@ -1986,8 +1992,20 @@ public struct ChatFeature {
         state.submitOperation?.outcome = outcome
         switch outcome {
         case .accepted:
-          state.attachmentReceipts.removeAll()
-          clearSubmitRecovery(into: &state)
+          // The prompt consumed this operation's staged batch. Receipts owned elsewhere
+          // (or unattributed) are not proven consumed and keep protecting the slot.
+          state.attachmentReceipts = state.attachmentReceipts.filter { $0.value.operationID != id }
+          if state.stagingBlockOwner == id, state.attachmentReceipts.isEmpty {
+            state.legacyStagingBlocked = false
+            // Retire only the hydrate's staging guidance; keep any unrelated banner.
+            if state.errorBanner?.hasPrefix("Attachment or delivery recovery requires a new chat") == true {
+              state.errorBanner = nil
+            }
+          }
+          state.stagingBlockOwner = nil
+          // A latch that survives (sticky reason or foreign staging) keeps its persisted
+          // fence too, so a relaunch still reconstructs the block instead of forgetting it.
+          if !state.legacyStagingBlocked { clearSubmitRecovery(into: &state) }
           return drainQueueIfReady(into: &state)
         case .unknown:
           state.isQueueParked = true
@@ -2022,7 +2040,7 @@ public struct ChatFeature {
       case let .attachmentAcknowledged(operationID, attachmentID, sessionID, ref):
         guard state.submitOperation?.id == operationID,
               !(state.legacyStagingBlocked && state.submitOperation?.outcome == .unknown) else { return .none }
-        state.attachmentReceipts[attachmentID] = AttachmentReceipt(sessionID: sessionID, ref: ref)
+        state.attachmentReceipts[attachmentID] = AttachmentReceipt(sessionID: sessionID, ref: ref, operationID: operationID)
         if let index = state.attachments.firstIndex(where: { $0.id == attachmentID }) {
           state.attachments[index].uploadState = .uploaded(ref: ref)
         }
@@ -2034,7 +2052,7 @@ public struct ChatFeature {
         state.submitOperation?.outcome = .rejected // prompt was never attempted
         if GatewayError.server(message).isUnknownMethod { state.attachmentsUnsupported = true }
         if uncertain {
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
           state.errorBanner = "Attachment staging is uncertain. Start a new chat; this server cannot safely remove staged input."
           state.isSending = false
           state.isQueueParked = true
@@ -2127,7 +2145,7 @@ public struct ChatFeature {
            state.attachmentSubmitOwnership != nil,
            state.submitOperation?.outcome == .submitting {
           state.submitOperation?.outcome = .unknown
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
           state.isQueueParked = true
           reparkDrainingEntry(into: &state)
         }
@@ -2179,7 +2197,7 @@ public struct ChatFeature {
       case let .queuedPromptDeleted(id):
         if let entry = state.queuedPrompts.first(where: { $0.id == id }),
            entry.attachments.contains(where: { state.attachmentReceipts[$0.id] != nil }) {
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
           state.errorBanner = "Start a new chat to discard staged attachments safely."
         }
         state.queuedPrompts.removeAll { $0.id == id }
@@ -2892,7 +2910,7 @@ public struct ChatFeature {
         }
         // Removal cannot retract session-global staging on a legacy gateway.
         if state.attachmentReceipts[id] != nil {
-          state.legacyStagingBlocked = true
+          state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
           state.errorBanner = "Start a new chat to remove staged attachments safely. This server has no attachment-abandon contract."
         }
         state.attachments.removeAll { $0.id == id }
@@ -4236,7 +4254,23 @@ public struct ChatFeature {
     state.isCatchingUp = false
     state.reconnectAttempt = 0
     // A hydrate cannot prove that session-global staging survived or remains unconsumed.
-    if !state.attachmentReceipts.isEmpty { state.legacyStagingBlocked = true }
+    // B4: when every receipt belongs to the still-unacknowledged current submit on this
+    // same session, the ambiguity is owned by that operation and its matching definitive
+    // acceptance resolves it. Anything else stays a sticky, unattributed latch.
+    if !state.attachmentReceipts.isEmpty {
+      let wasBlocked = state.legacyStagingBlocked
+      state.legacyStagingBlocked = true
+      if let operation = state.submitOperation, operation.outcome == .submitting,
+         operation.sessionID == response.sessionID,
+         (!wasBlocked || state.stagingBlockOwner == operation.id),
+         state.attachmentReceipts.values.allSatisfy({
+           $0.operationID == operation.id && $0.sessionID == operation.sessionID
+         }) {
+        state.stagingBlockOwner = operation.id
+      } else {
+        state.stagingBlockOwner = nil
+      }
+    }
     state.taskChecklist.reconcile(response, since: state.checklistAtHydrateStart)
     state.checklistAtHydrateStart = nil
     state.liveSessionID = response.sessionID
@@ -4866,7 +4900,7 @@ public struct ChatFeature {
     guard !state.deliveryBlocked else { return .none }
     let selectedIDs = Set(attachments.map(\.id))
     guard state.attachmentReceipts.keys.allSatisfy({ selectedIDs.contains($0) }) else {
-      state.legacyStagingBlocked = true
+      state.legacyStagingBlocked = true; state.stagingBlockOwner = nil
       state.errorBanner = "Start a new chat: an earlier draft still has server-staged attachments."
       reparkDrainingEntry(into: &state)
       return .none
@@ -4900,6 +4934,10 @@ public struct ChatFeature {
       // One cancellable task owns the pipeline. Reducer ownership fences outcomes;
       // cancellation is checked before each stage, including with noncooperative mocks.
       state.attachmentSubmitOwnership = operationID
+      // A retry of the same batch adopts its already-staged receipts (the guard above
+      // proves every receipt belongs to this selection) so a later matching acceptance
+      // accounts for them. A sticky latch keeps blocking regardless (deliveryBlocked).
+      for id in state.attachmentReceipts.keys { state.attachmentReceipts[id]?.operationID = operationID }
       let receipts = state.attachmentReceipts
       return .merge(anchor, .run { [gateway, uuid] send in
         var refs: [String] = []
